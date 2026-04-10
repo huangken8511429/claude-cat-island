@@ -56,6 +56,7 @@ function App() {
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isHovering = useRef(false);
   const autoCollapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevMode = useRef<IslandMode>("pill");
 
   const islandRef = useRef<HTMLDivElement>(null);
   const lastAutoNotifyBySession = useRef<Map<string, number>>(new Map());
@@ -110,15 +111,20 @@ function App() {
   }, []);
 
   // ── Resize on mode change ──
-  // Expand (→ full): resize immediately so content has room.
-  // Collapse (→ pill / notification): defer to transitionend listener below.
-  // CSS spec: interrupted transitions do not fire transitionend. So rapid
-  // mode switches from autoNotify chains resize only once, at the final
-  // stable mode — eliminating the setTimeout race entirely.
+  // Expand: resize immediately so the Tauri window has room before the CSS
+  // island grows into it. Otherwise the island would exceed the transparent
+  // window bounds during the 400ms transition and get clipped mid-animation —
+  // visible as a distorted pill when autoNotify fires from pill mode.
+  // Collapse: defer to the transitionend listener below so the shrinking
+  // island stays inside the window until the animation completes.
   useEffect(() => {
-    if (mode === "full") {
+    const prev = prevMode.current;
+    const isExpand =
+      mode === "full" || (mode === "notification" && prev === "pill");
+    if (isExpand) {
       resizeWindowToTarget();
     }
+    prevMode.current = mode;
   }, [mode, sessions.length, inDetail, resizeWindowToTarget]);
 
   // ── transitionend listener on .island for deferred (collapse) resize ──
