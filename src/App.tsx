@@ -349,7 +349,7 @@ function App() {
           {/* Mini cat stack for multiple sessions */}
           {aliveSessions.length > 1 ? (
             <div className="pill-cat-stack">
-              {aliveSessions.slice(0, 3).map((s, i) => (
+              {aliveSessions.map((s, i) => (
                 <CatLogo
                   key={s.sessionId}
                   state={getPillCatState(s.sessionId)}
@@ -357,9 +357,6 @@ function App() {
                   themeIndex={i}
                 />
               ))}
-              {aliveSessions.length > 3 && (
-                <span className="pill-cat-extra">+{aliveSessions.length - 3}</span>
-              )}
             </div>
           ) : (
             <CatLogo
