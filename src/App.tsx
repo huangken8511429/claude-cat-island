@@ -9,7 +9,6 @@ import PermissionPanel from "./components/PermissionPanel";
 // ApprovalPanel removed — approvals are now inline in SessionPanel
 import CatLogo from "./components/CatLogo";
 import { initAudio, playDoneChime, playAlertBlip, playSessionStart, playSessionEnd, playApprovalUrgent, playContextWarning } from "./utils/sound";
-import { getPillLabel as computePillLabel } from "./utils/pillLabel";
 import "./App.css";
 
 type Tab = "sessions" | "tokens" | "skills" | "permissions";
@@ -21,6 +20,15 @@ interface LatestNotification {
   project: string;
   message: string;
 }
+
+// ── Pill status indicator components ──
+const PillSpinner = () => <div className="pill-spinner" aria-label="processing" />;
+const PillAmberDot = () => <div className="pill-amber-dot" aria-label="approval pending" />;
+const PillGreenCheck = () => (
+  <svg className="pill-green-check" viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M3 8 L7 12 L13 4" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 function App() {
   const [mode, setMode] = useState<IslandMode>("pill");
@@ -34,7 +42,6 @@ function App() {
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [activities, setActivities] = useState<Record<string, SessionActivityInfo>>({});
   const [inDetail, setInDetail] = useState(false);
-  const [pillRotateIdx, setPillRotateIdx] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [, setAudioReady] = useState(false);
   const [lastNotifText, setLastNotifText] = useState("");
@@ -51,7 +58,7 @@ function App() {
   const autoCollapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const islandRef = useRef<HTMLDivElement>(null);
-  const windowResizeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAutoNotifyBySession = useRef<Map<string, number>>(new Map());
   const approvalFirstSeen = useRef<Map<string, number>>(new Map());
   const lastApprovalBlipTs = useRef(0);
 
@@ -67,64 +74,65 @@ function App() {
     invoke("set_auto_approve", { enabled: true }).catch(() => {});
   }, []);
 
-  // ── Dynamic window dimensions ──
-  const getFullSize = () => {
-    if (inDetail) {
-      // Detail mode: maximize height for transcript reading
-      return { w: 340, h: 620 };
-    }
-    // tab bar(40) + content padding(24) + session cards(~52 each) + min base
-    const sessionCount = sessions.length;
-    const baseH = 120; // tab bar + padding + title
-    const perSession = 52;
-    const h = Math.min(500, Math.max(200, baseH + sessionCount * perSession));
-    return { w: 340, h };
-  };
-
-  const getWindowSize = () => {
-    if (mode === "pill") return { w: 240, h: 36 };
-    if (mode === "notification") return { w: 350, h: 68 };
-    return getFullSize();
-  };
-
-  // ── Resize window to match island mode ──
-  // Window bounds = island bounds, so only the island captures mouse events.
+  // ── latestConfig ref keeps the transitionend listener free of stale closures ──
+  const latestConfig = useRef({ mode, sessionCount: sessions.length, inDetail });
   useEffect(() => {
-    const appWindow = getCurrentWindow();
-    const { w, h } = getWindowSize();
-
-    const resize = async () => {
-      try {
-        const monitor = await currentMonitor();
-        if (!monitor) return;
-        const screenW = monitor.size.width / monitor.scaleFactor;
-        // Shift slightly left from center so the cat clears the notch
-        const x = Math.round((screenW - w) / 2 - 20);
-        await appWindow.setSize(new LogicalSize(w, h));
-        await appWindow.setPosition(new LogicalPosition(x, 0));
-      } catch {}
-    };
-
-    if (windowResizeTimer.current) {
-      clearTimeout(windowResizeTimer.current);
-      windowResizeTimer.current = null;
-    }
-
-    if (mode === "pill" || mode === "notification") {
-      // Collapsing: delay resize to let CSS transition finish (0.4s)
-      windowResizeTimer.current = setTimeout(resize, 420);
-    } else {
-      // Expanding to full: resize immediately so content has room
-      resize();
-    }
-
-    return () => {
-      if (windowResizeTimer.current) {
-        clearTimeout(windowResizeTimer.current);
-        windowResizeTimer.current = null;
-      }
-    };
+    latestConfig.current = { mode, sessionCount: sessions.length, inDetail };
   }, [mode, sessions.length, inDetail]);
+
+  // ── Compute target window size from latestConfig and apply it ──
+  // Window bounds = island bounds, so only the island captures mouse events.
+  const resizeWindowToTarget = useCallback(async () => {
+    const cfg = latestConfig.current;
+    let w: number, h: number;
+    if (cfg.mode === "pill") {
+      w = 240; h = 36;
+    } else if (cfg.mode === "notification") {
+      w = 350; h = 68;
+    } else if (cfg.inDetail) {
+      // Detail mode: maximize height for transcript reading
+      w = 340; h = 620;
+    } else {
+      // Full mode: grow with session count, clamped 200–500
+      w = 340;
+      h = Math.min(500, Math.max(200, 120 + cfg.sessionCount * 52));
+    }
+    try {
+      const appWindow = getCurrentWindow();
+      const monitor = await currentMonitor();
+      if (!monitor) return;
+      const screenW = monitor.size.width / monitor.scaleFactor;
+      // Shift slightly left from center so the cat clears the notch
+      const x = Math.round((screenW - w) / 2 - 20);
+      await appWindow.setSize(new LogicalSize(w, h));
+      await appWindow.setPosition(new LogicalPosition(x, 0));
+    } catch {}
+  }, []);
+
+  // ── Resize on mode change ──
+  // Expand (→ full): resize immediately so content has room.
+  // Collapse (→ pill / notification): defer to transitionend listener below.
+  // CSS spec: interrupted transitions do not fire transitionend. So rapid
+  // mode switches from autoNotify chains resize only once, at the final
+  // stable mode — eliminating the setTimeout race entirely.
+  useEffect(() => {
+    if (mode === "full") {
+      resizeWindowToTarget();
+    }
+  }, [mode, sessions.length, inDetail, resizeWindowToTarget]);
+
+  // ── transitionend listener on .island for deferred (collapse) resize ──
+  useEffect(() => {
+    const el = islandRef.current;
+    if (!el) return;
+    const onEnd = (e: TransitionEvent) => {
+      if (e.target !== el) return;             // ignore child bubbling
+      if (e.propertyName !== "width") return;  // dedupe height / border-radius
+      resizeWindowToTarget();
+    };
+    el.addEventListener("transitionend", onEnd);
+    return () => el.removeEventListener("transitionend", onEnd);
+  }, [resizeWindowToTarget]);
 
   // ── Mode transitions (CSS only, no window resize) ──
   const clearTimers = () => {
@@ -143,8 +151,15 @@ function App() {
     collapseTimer.current = setTimeout(() => setMode("pill"), 300);
   }, []);
 
-  const autoNotify = useCallback(() => {
+  const autoNotify = useCallback((sessionKey?: string) => {
     if (Date.now() - launchTime.current < 8000) return;
+    // Per-session debounce: skip if same sessionKey fired within 30s
+    if (sessionKey) {
+      const now = Date.now();
+      const last = lastAutoNotifyBySession.current.get(sessionKey) ?? 0;
+      if (now - last < 30_000) return;
+      lastAutoNotifyBySession.current.set(sessionKey, now);
+    }
     clearTimers();
     setMode("notification");
     autoCollapseTimer.current = setTimeout(() => {
@@ -196,14 +211,17 @@ function App() {
           setLastNotifText(`${proj}: ${preview}`);
           setToast(`${proj}: ${preview}`);
           setTimeout(() => setToast(null), 5000);
-          autoNotify();
+          autoNotify("notif:" + (notif.project || "_global"));
         }
 
         // ── New approval pending ──
         const newPending = ps.filter(
           (pp) => !prevPendingIds.current.has(pp.session_id) && s.some((ss) => ss.sessionId === pp.session_id && ss.isAlive)
         );
-        if (newPending.length > 0) { playAlertBlip(); autoNotify(); }
+        if (newPending.length > 0) {
+          playAlertBlip();
+          newPending.forEach((pp) => autoNotify("approval:" + pp.session_id));
+        }
 
         // ── Approval urgency escalation ──
         const now = Date.now();
@@ -238,7 +256,7 @@ function App() {
             setLastNotifText(`${name} ended`);
             setToast(`${name} ended`);
             setTimeout(() => setToast(null), 5000);
-            autoNotify();
+            autoNotify("end:" + ss.sessionId);
           }
           prevAlive.current.set(ss.sessionId, ss.isAlive);
         });
@@ -261,14 +279,6 @@ function App() {
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, [refresh]);
-
-  // Pill label rotation — separate effect, no dependency on refresh
-  useEffect(() => {
-    const rotateInterval = setInterval(() => {
-      setPillRotateIdx((prev) => prev + 1);
-    }, 3000);
-    return () => clearInterval(rotateInterval);
-  }, []);
 
   const handleResolveApproval = async (id: string, behavior: "allow" | "deny") => {
     try {
@@ -299,7 +309,13 @@ function App() {
     (ps) => ps.pending === "waiting_input" && sessions.some((s) => s.sessionId === ps.session_id && s.isAlive)
   );
 
-  const pillLabel = computePillLabel(aliveSessions, needsAttention, waitingInput, activities, pillRotateIdx);
+  // ── Aggregate booleans for pill status indicator ──
+  const hasPendingApproval = needsAttention.length > 0;
+  const hasWaitingForInput = waitingInput.length > 0;
+  const isAnyProcessing = aliveSessions.some((s) => {
+    const a = activities[s.sessionId]?.activity;
+    return a === "reading" || a === "writing" || a === "building" || a === "searching" || a === "thinking";
+  });
 
   // Derive pill CatLogo emotion state (safe — always returns a valid state)
   const getPillCatState = (_sessionId?: string): CatState => {
@@ -345,13 +361,16 @@ function App() {
               size={24}
             />
           )}
-          <span className="pill-label">{pillLabel}</span>
-          {lastNotifText && mode === "pill" && (
-            <>
-              <span className="pill-sep" />
-              <span className="pill-notif">{lastNotifText}</span>
-            </>
-          )}
+          {/* Aggregated status indicator (priority: approval > processing > waiting) */}
+          <div className="pill-status">
+            {hasPendingApproval ? (
+              <PillAmberDot />
+            ) : isAnyProcessing ? (
+              <PillSpinner />
+            ) : hasWaitingForInput ? (
+              <PillGreenCheck />
+            ) : null}
+          </div>
         </div>
 
         {/* ── Pill progress bar ── */}
