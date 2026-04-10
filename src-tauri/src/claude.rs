@@ -586,6 +586,19 @@ pub struct SkillInfo {
     pub description: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDetail {
+    pub name: String,
+    pub path: String,
+    /// Ordered frontmatter key/value pairs. Empty if the file has no frontmatter.
+    pub frontmatter: Vec<(String, String)>,
+    /// Markdown body — the content after the closing `---`, or the whole file if no frontmatter.
+    pub body: String,
+    /// Absolute path of the .md file we actually read.
+    pub source_file: String,
+}
+
 pub fn read_skills() -> Result<Vec<SkillInfo>, Box<dyn std::error::Error>> {
     let skills_dir = claude_dir().join("skills");
     let mut skills = Vec::new();
@@ -612,18 +625,116 @@ pub fn read_skills() -> Result<Vec<SkillInfo>, Box<dyn std::error::Error>> {
     Ok(skills)
 }
 
+pub fn read_skill_detail(name: &str) -> Result<SkillDetail, Box<dyn std::error::Error>> {
+    let skill_dir = claude_dir().join("skills").join(name);
+    if !skill_dir.is_dir() {
+        return Err(format!("skill not found: {}", name).into());
+    }
+    let md_path = find_primary_md(&skill_dir)
+        .ok_or_else(|| format!("no markdown file in skill: {}", name))?;
+    let content = fs::read_to_string(&md_path)?;
+    let (frontmatter, body) = match split_frontmatter(&content) {
+        Some((fm, body_str)) => {
+            let pairs = serde_yaml::from_str::<serde_yaml::Value>(fm)
+                .map(|v| yaml_to_pairs(&v))
+                .unwrap_or_default();
+            (pairs, body_str.to_string())
+        }
+        None => (Vec::new(), content.clone()),
+    };
+    Ok(SkillDetail {
+        name: name.to_string(),
+        path: skill_dir.to_string_lossy().to_string(),
+        frontmatter,
+        body,
+        source_file: md_path.to_string_lossy().to_string(),
+    })
+}
+
+fn find_primary_md(skill_dir: &PathBuf) -> Option<PathBuf> {
+    let skill_md = skill_dir.join("SKILL.md");
+    if skill_md.is_file() {
+        return Some(skill_md);
+    }
+    let mut candidates: Vec<PathBuf> = fs::read_dir(skill_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().map_or(false, |ext| ext == "md"))
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+/// Split a markdown file into (frontmatter, body) if it starts with a `---`-delimited YAML block.
+/// Returns None if the file does not begin with `---`.
+fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
+    let rest = content.strip_prefix("---\n").or_else(|| content.strip_prefix("---\r\n"))?;
+    // Find the closing `---` on its own line.
+    let mut idx = 0usize;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed == "---" {
+            let fm = &rest[..idx];
+            let body_start = idx + line.len();
+            let body = if body_start <= rest.len() { &rest[body_start..] } else { "" };
+            return Some((fm, body));
+        }
+        idx += line.len();
+    }
+    None
+}
+
+/// Flatten a YAML mapping into ordered (key, display-value) pairs.
+/// Nested structures are rendered via serde_yaml's to_string for readability.
+fn yaml_to_pairs(value: &serde_yaml::Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let serde_yaml::Value::Mapping(map) = value {
+        for (k, v) in map {
+            let key = match k {
+                serde_yaml::Value::String(s) => s.clone(),
+                other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+            };
+            let display = match v {
+                serde_yaml::Value::String(s) => s.clone(),
+                serde_yaml::Value::Bool(b) => b.to_string(),
+                serde_yaml::Value::Number(n) => n.to_string(),
+                serde_yaml::Value::Null => String::new(),
+                other => serde_yaml::to_string(other)
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_string(),
+            };
+            out.push((key, display));
+        }
+    }
+    out
+}
+
 fn read_skill_description(skill_dir: &PathBuf) -> Option<String> {
-    for entry in fs::read_dir(skill_dir).ok()? {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "md") {
-            let content = fs::read_to_string(&path).ok()?;
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---") {
-                    return Some(trimmed.chars().take(100).collect());
+    let md_path = find_primary_md(skill_dir)?;
+    let content = fs::read_to_string(&md_path).ok()?;
+
+    // Prefer YAML frontmatter `description` field when present.
+    if let Some((fm, _body)) = split_frontmatter(&content) {
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(fm) {
+            if let Some(desc) = value
+                .get("description")
+                .and_then(|v| v.as_str())
+            {
+                let trimmed = desc.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.chars().take(200).collect());
                 }
             }
+        }
+    }
+
+    // Fallback: first non-empty, non-heading, non-delimiter line (legacy behaviour).
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---") {
+            return Some(trimmed.chars().take(100).collect());
         }
     }
     None

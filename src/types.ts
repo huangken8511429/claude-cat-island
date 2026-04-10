@@ -27,6 +27,14 @@ export interface SkillInfo {
   description: string;
 }
 
+export interface SkillDetail {
+  name: string;
+  path: string;
+  frontmatter: Array<[string, string]>;
+  body: string;
+  sourceFile: string;
+}
+
 export interface PermissionConfig {
   skipDangerousMode: boolean;
   autoApproveAll: boolean;

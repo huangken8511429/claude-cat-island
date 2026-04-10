@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { SkillInfo } from "../types";
+import SkillDetail from "./SkillDetail";
 
 interface Props {
   skills: SkillInfo[];
+  onDetailChange?: (inDetail: boolean) => void;
 }
 
 function getCategoryColor(name: string): string {
@@ -12,7 +15,23 @@ function getCategoryColor(name: string): string {
   return "#bb88ff";
 }
 
-export default function SkillPanel({ skills }: Props) {
+export default function SkillPanel({ skills, onDetailChange }: Props) {
+  const [selected, setSelected] = useState<string | null>(null);
+
+  if (selected) {
+    return (
+      <SkillDetail
+        skillName={selected}
+        onBack={() => { setSelected(null); onDetailChange?.(false); }}
+      />
+    );
+  }
+
+  const openSkill = (name: string) => {
+    setSelected(name);
+    onDetailChange?.(true);
+  };
+
   return (
     <div className="panel skill-panel">
       <h2 className="panel-title">
@@ -27,7 +46,19 @@ export default function SkillPanel({ skills }: Props) {
           </div>
         )}
         {skills.map((skill) => (
-          <div key={skill.name} className="skill-item">
+          <div
+            key={skill.name}
+            className="skill-item"
+            role="button"
+            tabIndex={0}
+            onClick={() => openSkill(skill.name)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openSkill(skill.name);
+              }
+            }}
+          >
             <span className="skill-dot" style={{ background: getCategoryColor(skill.name) }} aria-hidden="true" />
             <div className="skill-info">
               <div

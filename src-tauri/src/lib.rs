@@ -2,7 +2,7 @@ mod claude;
 mod approval;
 
 use approval::{ApprovalDecision, ApprovalServer, PendingApproval};
-use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PermissionConfig, SessionActivityInfo, SessionPendingState, SkillInfo, TokenStats, TranscriptMessage};
+use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PermissionConfig, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
 use tauri::PhysicalPosition;
 use std::sync::Arc;
 
@@ -49,6 +49,11 @@ fn get_session_activity(session_id: String, cwd: String) -> Result<SessionActivi
 #[tauri::command]
 fn get_skills() -> Result<Vec<SkillInfo>, String> {
     claude::read_skills().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_skill_detail(name: String) -> Result<SkillDetail, String> {
+    claude::read_skill_detail(&name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -150,6 +155,7 @@ pub fn run() {
             get_recent_events,
             get_latest_notification,
             get_skills,
+            get_skill_detail,
             get_permissions,
             set_skip_dangerous,
             set_auto_approve,

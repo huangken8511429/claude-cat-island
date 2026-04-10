@@ -446,7 +446,7 @@ function App() {
             <main className="content">
               {tab === "sessions" && <SessionPanel sessions={sessions} pendingStates={pendingStates} pendingApprovals={pendingApprovals} onResolveApproval={handleResolveApproval} onDetailChange={setInDetail} />}
               {tab === "tokens" && <TokenPanel stats={stats} live={live} />}
-              {tab === "skills" && <SkillPanel skills={skills} />}
+              {tab === "skills" && <SkillPanel skills={skills} onDetailChange={setInDetail} />}
               {tab === "permissions" && (
                 <PermissionPanel permissions={permissions}
                   onToggleSkipDangerous={handleToggleSkipDangerous}
