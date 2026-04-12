@@ -12,46 +12,98 @@ fn monitor_dir() -> PathBuf {
     PathBuf::from(home).join(".claude-cat-monitor")
 }
 
-/// Find the best transcript file for a session.
-/// Claude Code may resume sessions under a new transcript file,
-/// so the sessionId in the session metadata may be stale.
-/// Strategy: try exact match first, then fall back to most recently modified .jsonl in the project dir.
-fn find_transcript_path(session_id: &str, cwd: &str) -> Option<PathBuf> {
-    let project_key = cwd.replace('/', "-");
-    let project_dir = claude_dir().join("projects").join(&project_key);
-
-    // Try exact match first
-    let exact = project_dir.join(format!("{}.jsonl", session_id));
-    if exact.exists() {
-        // Check if there's a newer file — if so, the session was resumed
-        if let Ok(entries) = fs::read_dir(&project_dir) {
-            let exact_modified = fs::metadata(&exact)
-                .and_then(|m| m.modified())
-                .ok();
-
-            let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                        if newest.as_ref().map_or(true, |(_, t)| modified > *t) {
-                            newest = Some((path, modified));
-                        }
-                    }
-                }
-            }
-
-            if let (Some((newest_path, newest_time)), Some(exact_time)) = (newest, exact_modified) {
-                // If a different file is newer by more than 60s, use that instead
-                if newest_path != exact {
-                    if let Ok(diff) = newest_time.duration_since(exact_time) {
-                        if diff.as_secs() > 60 {
-                            return Some(newest_path);
+/// Collect session IDs of all currently-alive sessions (quick, reads small JSON files).
+fn alive_session_ids() -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    let sessions_dir = claude_dir().join("sessions");
+    if let Ok(entries) = fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let (Some(pid), Some(sid)) = (
+                        val.get("pid").and_then(|v| v.as_u64()),
+                        val.get("sessionId").and_then(|v| v.as_str()),
+                    ) {
+                        if is_process_alive(pid as u32) {
+                            ids.insert(sid.to_string());
                         }
                     }
                 }
             }
         }
+    }
+    ids
+}
+
+/// Find the best transcript file for a session.
+///
+/// After a context compaction, Claude Code creates a NEW transcript file with a
+/// different session ID while the process (PID) stays the same. The session
+/// metadata still references the OLD session ID. So the exact-match file becomes
+/// stale and we need to find the compacted transcript.
+///
+/// Strategy:
+/// 1. If exact match exists and was modified recently (< 2 min) → use it.
+/// 2. If exact match is stale → find the newest recently-modified .jsonl in the
+///    project dir, EXCLUDING files that are exact matches for other alive sessions
+///    (to avoid cross-session contamination).
+/// 3. If no recent file found → use exact match (best effort for dead sessions).
+/// 4. If no exact match at all → use newest .jsonl in project dir.
+fn find_transcript_path(session_id: &str, cwd: &str) -> Option<PathBuf> {
+    let project_key = cwd.replace('/', "-");
+    let project_dir = claude_dir().join("projects").join(&project_key);
+
+    let exact = project_dir.join(format!("{}.jsonl", session_id));
+    if exact.exists() {
+        // Check freshness: was this file modified within the last 2 minutes?
+        let is_fresh = fs::metadata(&exact)
+            .and_then(|m| m.modified())
+            .ok()
+            .map_or(false, |t| t.elapsed().map_or(true, |d| d.as_secs() < 120));
+
+        if is_fresh {
+            return Some(exact);
+        }
+
+        // Exact match is stale — likely compacted. Look for the real transcript.
+        // Exclude files that belong to other alive sessions to avoid cross-contamination.
+        let other_alive: std::collections::HashSet<String> = alive_session_ids()
+            .into_iter()
+            .filter(|id| id != session_id)
+            .collect();
+
+        if let Ok(entries) = fs::read_dir(&project_dir) {
+            let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                // Skip the stale exact match
+                if path == exact {
+                    continue;
+                }
+                // Skip files that are exact matches for other alive sessions
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if other_alive.contains(stem) {
+                        continue;
+                    }
+                }
+                if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                    if newest.as_ref().map_or(true, |(_, t)| modified > *t) {
+                        newest = Some((path, modified));
+                    }
+                }
+            }
+            if let Some((path, mod_time)) = newest {
+                // Only use the newer file if it was modified recently (within 5 min)
+                if mod_time.elapsed().map_or(true, |d| d.as_secs() < 300) {
+                    return Some(path);
+                }
+            }
+        }
+
+        // No recent replacement found — use stale exact match (dead session or gap)
         return Some(exact);
     }
 
@@ -138,7 +190,7 @@ pub fn read_session_last_message(
     let file_len = file.metadata()?.len();
     let tail_size: u64 = 16 * 1024;
     let content = if file_len > tail_size {
-        use std::io::{Seek, SeekFrom, Read as IoRead};
+        use std::io::{Read as IoRead, Seek, SeekFrom};
         let mut f = file;
         f.seek(SeekFrom::End(-(tail_size as i64)))?;
         let mut buf = String::new();
@@ -175,7 +227,10 @@ pub fn read_session_last_message(
                             text: text.to_string(),
                             tool_name: None,
                             tool_input: None,
-                            timestamp: val.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            timestamp: val
+                                .get("timestamp")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                         });
                     }
                 }
@@ -187,7 +242,10 @@ pub fn read_session_last_message(
                     text: text.to_string(),
                     tool_name: None,
                     tool_input: None,
-                    timestamp: val.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    timestamp: val
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
         }
@@ -228,7 +286,7 @@ pub fn read_session_activity(
     let file_len = file.metadata()?.len();
     let tail_size: u64 = 8 * 1024;
     let content = if file_len > tail_size {
-        use std::io::{Seek, SeekFrom, Read as IoRead};
+        use std::io::{Read as IoRead, Seek, SeekFrom};
         let mut f = file;
         f.seek(SeekFrom::End(-(tail_size as i64)))?;
         let mut buf = String::new();
@@ -268,11 +326,18 @@ fn derive_activity_from_content(content: &str) -> (String, Option<String>) {
             if let Some(arr) = val.pointer("/message/content").and_then(|v| v.as_array()) {
                 for block in arr {
                     if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                        found_tool = block.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        found_tool = block
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                     }
                 }
             }
-            last_type = if msg_type == "user" { "user" } else { "assistant" };
+            last_type = if msg_type == "user" {
+                "user"
+            } else {
+                "assistant"
+            };
             last_tool = found_tool;
             last_val = Some(val);
         }
@@ -290,8 +355,15 @@ fn derive_activity_from_content(content: &str) -> (String, Option<String>) {
         },
         ("assistant", None) => {
             if let Some(val) = &last_val {
-                let stop = val.get("stop_reason").and_then(|v| v.as_str()).unwrap_or("");
-                if stop == "end_turn" { "done" } else { "thinking" }
+                let stop = val
+                    .get("stop_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if stop == "end_turn" {
+                    "done"
+                } else {
+                    "thinking"
+                }
             } else {
                 "idle"
             }
@@ -446,8 +518,8 @@ pub fn read_latest_notification() -> Result<LatestNotification, Box<dyn std::err
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TranscriptMessage {
-    pub role: String,            // "user" | "assistant" | "system"
-    pub text: String,            // main text content
+    pub role: String, // "user" | "assistant" | "system"
+    pub text: String, // main text content
     #[serde(rename = "toolName")]
     pub tool_name: Option<String>,
     #[serde(rename = "toolInput")]
@@ -469,7 +541,7 @@ pub fn read_session_transcript(
     let file_len = file.metadata()?.len();
     let tail_size: u64 = 256 * 1024;
     let content = if file_len > tail_size {
-        use std::io::{Seek, SeekFrom, Read as IoRead};
+        use std::io::{Read as IoRead, Seek, SeekFrom};
         let mut f = file;
         f.seek(SeekFrom::End(-(tail_size as i64)))?;
         let mut buf = String::new();
@@ -508,12 +580,18 @@ pub fn read_session_transcript(
                                         text: text.to_string(),
                                         tool_name: None,
                                         tool_input: None,
-                                        timestamp: val.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        timestamp: val
+                                            .get("timestamp")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string()),
                                     });
                                 }
                             }
                             "tool_use" => {
-                                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                let name = block
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
                                 let input_summary = extract_tool_summary(name, block.get("input"));
                                 messages.push(TranscriptMessage {
                                     role: "tool".to_string(),
@@ -533,7 +611,10 @@ pub fn read_session_transcript(
                             text: text.to_string(),
                             tool_name: None,
                             tool_input: None,
-                            timestamp: val.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            timestamp: val
+                                .get("timestamp")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                         });
                     }
                 }
@@ -557,9 +638,21 @@ fn extract_tool_summary(tool_name: &str, input: Option<&serde_json::Value>) -> S
         None => return String::new(),
     };
     match tool_name {
-        "Read" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "Write" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "Edit" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Read" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Write" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Edit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         "Bash" => {
             let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
             cmd.chars().take(80).collect()
@@ -568,7 +661,11 @@ fn extract_tool_summary(tool_name: &str, input: Option<&serde_json::Value>) -> S
             let pat = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             format!("/{}/", pat)
         }
-        "Glob" => input.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         _ => {
             let s = serde_json::to_string(input).unwrap_or_default();
             s.chars().take(80).collect()
@@ -669,7 +766,9 @@ fn find_primary_md(skill_dir: &PathBuf) -> Option<PathBuf> {
 /// Split a markdown file into (frontmatter, body) if it starts with a `---`-delimited YAML block.
 /// Returns None if the file does not begin with `---`.
 fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
-    let rest = content.strip_prefix("---\n").or_else(|| content.strip_prefix("---\r\n"))?;
+    let rest = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))?;
     // Find the closing `---` on its own line.
     let mut idx = 0usize;
     for line in rest.split_inclusive('\n') {
@@ -677,7 +776,11 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
         if trimmed == "---" {
             let fm = &rest[..idx];
             let body_start = idx + line.len();
-            let body = if body_start <= rest.len() { &rest[body_start..] } else { "" };
+            let body = if body_start <= rest.len() {
+                &rest[body_start..]
+            } else {
+                ""
+            };
             return Some((fm, body));
         }
         idx += line.len();
@@ -693,7 +796,10 @@ fn yaml_to_pairs(value: &serde_yaml::Value) -> Vec<(String, String)> {
         for (k, v) in map {
             let key = match k {
                 serde_yaml::Value::String(s) => s.clone(),
-                other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+                other => serde_yaml::to_string(other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
             };
             let display = match v {
                 serde_yaml::Value::String(s) => s.clone(),
@@ -718,10 +824,7 @@ fn read_skill_description(skill_dir: &PathBuf) -> Option<String> {
     // Prefer YAML frontmatter `description` field when present.
     if let Some((fm, _body)) = split_frontmatter(&content) {
         if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(fm) {
-            if let Some(desc) = value
-                .get("description")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(desc) = value.get("description").and_then(|v| v.as_str()) {
                 let trimmed = desc.trim();
                 if !trimmed.is_empty() {
                     return Some(trimmed.chars().take(200).collect());
@@ -814,7 +917,8 @@ pub struct SessionPendingState {
     pub ts: u64,
 }
 
-pub fn read_session_pending_states() -> Result<Vec<SessionPendingState>, Box<dyn std::error::Error>> {
+pub fn read_session_pending_states() -> Result<Vec<SessionPendingState>, Box<dyn std::error::Error>>
+{
     let events_path = monitor_dir().join("events.jsonl");
     if !events_path.exists() {
         return Ok(vec![]);
@@ -823,7 +927,8 @@ pub fn read_session_pending_states() -> Result<Vec<SessionPendingState>, Box<dyn
     let content = fs::read_to_string(&events_path)?;
 
     // Build a map of session_id -> latest meaningful event
-    let mut latest: std::collections::HashMap<String, (String, u64, serde_json::Value)> = std::collections::HashMap::new();
+    let mut latest: std::collections::HashMap<String, (String, u64, serde_json::Value)> =
+        std::collections::HashMap::new();
 
     for line in content.lines() {
         let val: serde_json::Value = match serde_json::from_str(line) {
@@ -834,7 +939,10 @@ pub fn read_session_pending_states() -> Result<Vec<SessionPendingState>, Box<dyn
         let event = val.get("event").and_then(|v| v.as_str()).unwrap_or("");
         let ts = val.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
         let data = val.get("data").cloned().unwrap_or(serde_json::Value::Null);
-        let session_id = data.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+        let session_id = data
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         if session_id.is_empty() {
             continue;
@@ -857,7 +965,10 @@ pub fn read_session_pending_states() -> Result<Vec<SessionPendingState>, Box<dyn
         let pending = match event.as_str() {
             "PermissionRequest" => "needs_approval",
             "Notification" => {
-                let ntype = data.get("notification_type").and_then(|v| v.as_str()).unwrap_or("");
+                let ntype = data
+                    .get("notification_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if ntype == "permission_prompt" {
                     "needs_approval"
                 } else {
@@ -872,8 +983,13 @@ pub fn read_session_pending_states() -> Result<Vec<SessionPendingState>, Box<dyn
             continue;
         }
 
-        let tool_name = data.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let message = data.get("last_assistant_message")
+        let tool_name = data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let message = data
+            .get("last_assistant_message")
             .or_else(|| data.get("message"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -902,7 +1018,8 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
         .output()?;
 
     let lsof_out = String::from_utf8_lossy(&output.stdout);
-    let tty = lsof_out.lines()
+    let tty = lsof_out
+        .lines()
         .skip(1) // header
         .filter_map(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -919,19 +1036,19 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
             "iTerm2" | "iTerm" => {
                 let script = format!(
                     r#"tell application "iTerm2"
-                        activate
-                        repeat with w in windows
-                            repeat with t in tabs of w
-                                repeat with s in sessions of t
-                                    if tty of s contains "{}" then
-                                        select t
-                                        set index of w to 1
-                                        return
-                                    end if
-                                end repeat
-                            end repeat
-                        end repeat
-                    end tell"#,
+                         activate
+                         repeat with w in windows
+                             repeat with t in tabs of w
+                                 repeat with s in sessions of t
+                                     if tty of s contains "{}" then
+                                         select t
+                                         set index of w to 1
+                                         return
+                                     end if
+                                 end repeat
+                             end repeat
+                         end repeat
+                     end tell"#,
                     tty_path
                 );
                 let _ = std::process::Command::new("osascript")
@@ -941,35 +1058,52 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
             "Terminal" => {
                 let script = format!(
                     r#"tell application "Terminal"
-                        activate
-                        repeat with w in windows
-                            repeat with t in tabs of w
-                                if tty of t is "{}" then
-                                    set selected tab of w to t
-                                    set index of w to 1
-                                    return
-                                end if
-                            end repeat
-                        end repeat
-                    end tell"#,
+                         activate
+                         repeat with w in windows
+                             repeat with t in tabs of w
+                                 if tty of t is "{}" then
+                                     set selected tab of w to t
+                                     set index of w to 1
+                                     return
+                                 end if
+                             end repeat
+                         end repeat
+                     end tell"#,
                     tty_path
                 );
                 let _ = std::process::Command::new("osascript")
                     .args(["-e", &script])
                     .output();
             }
-            _ => {
-                // Fallback: just activate the terminal app
+            "Ghostty" => {
+                ghostty_raise_window(Some(&tty_path));
+            }
+            "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
                 let _ = std::process::Command::new("osascript")
                     .args(["-e", &format!(r#"tell application "{}" to activate"#, terminal_app)])
                     .output();
             }
+            _ => {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!(r#"tell application "{}" to activate"#, terminal_app),
+                    ])
+                    .output();
+            }
         }
     } else {
-        // No TTY found, try to just activate the terminal
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &format!(r#"tell application "{}" to activate"#, terminal_app)])
-            .output();
+        match terminal_app.as_str() {
+            "Ghostty" => ghostty_raise_window(None),
+            _ => {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!(r#"tell application "{}" to activate"#, terminal_app),
+                    ])
+                    .output();
+            }
+        }
     }
 
     Ok(())
@@ -988,7 +1122,8 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
         .output()?;
 
     let lsof_out = String::from_utf8_lossy(&output.stdout);
-    let tty = lsof_out.lines()
+    let tty = lsof_out
+        .lines()
         .skip(1)
         .filter_map(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -1005,20 +1140,20 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
                 // iTerm2: activate window, then paste+send via write text
                 let script = format!(
                     r#"tell application "iTerm2"
-                        activate
-                        repeat with w in windows
-                            repeat with t in tabs of w
-                                repeat with s in sessions of t
-                                    if tty of s contains "{tty}" then
-                                        select t
-                                        set index of w to 1
-                                        tell s to write text "{text}"
-                                        return
-                                    end if
-                                end repeat
-                            end repeat
-                        end repeat
-                    end tell"#,
+                         activate
+                         repeat with w in windows
+                             repeat with t in tabs of w
+                                 repeat with s in sessions of t
+                                     if tty of s contains "{tty}" then
+                                         select t
+                                         set index of w to 1
+                                         tell s to write text "{text}"
+                                         return
+                                     end if
+                                 end repeat
+                             end repeat
+                         end repeat
+                     end tell"#,
                     tty = tty_path,
                     text = text.replace('\\', "\\\\").replace('"', "\\\""),
                 );
@@ -1031,22 +1166,22 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
                 // Terminal.app: activate + keystroke paste + return
                 let script = format!(
                     r#"tell application "Terminal"
-                        activate
-                        repeat with w in windows
-                            repeat with t in tabs of w
-                                if tty of t is "{tty}" then
-                                    set selected tab of w to t
-                                    set index of w to 1
-                                end if
-                            end repeat
-                        end repeat
-                    end tell
-                    delay 0.2
-                    tell application "System Events"
-                        keystroke "v" using command down
-                        delay 0.1
-                        key code 36
-                    end tell"#,
+                         activate
+                         repeat with w in windows
+                             repeat with t in tabs of w
+                                 if tty of t is "{tty}" then
+                                     set selected tab of w to t
+                                     set index of w to 1
+                                 end if
+                             end repeat
+                         end repeat
+                     end tell
+                     delay 0.2
+                     tell application "System Events"
+                         keystroke "v" using command down
+                         delay 0.1
+                         key code 36
+                     end tell"#,
                     tty = tty_path,
                 );
                 let _ = std::process::Command::new("osascript")
@@ -1054,19 +1189,38 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
                     .output();
                 return Ok("auto_sent".to_string());
             }
-            _ => {
-                // Other terminals (Ghostty, etc.): clipboard already set, just activate
-                // User does Cmd+V + Enter
+            "Ghostty" => {
+                ghostty_raise_window(Some(tty_path));
+                return Ok("clipboard_only".to_string());
+            }
+            "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
                 let _ = std::process::Command::new("osascript")
                     .args(["-e", &format!(r#"tell application "{}" to activate"#, terminal_app)])
                     .output();
                 return Ok("clipboard_only".to_string());
             }
+            _ => {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!(r#"tell application "{}" to activate"#, terminal_app),
+                    ])
+                    .output();
+                return Ok("clipboard_only".to_string());
+            }
         }
     } else {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &format!(r#"tell application "{}" to activate"#, terminal_app)])
-            .output();
+        match terminal_app.as_str() {
+            "Ghostty" => ghostty_raise_window(None),
+            _ => {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!(r#"tell application "{}" to activate"#, terminal_app),
+                    ])
+                    .output();
+            }
+        }
     }
 
     Ok("clipboard_only".to_string())
@@ -1150,10 +1304,15 @@ fn detect_terminal_for_pid(pid: u32) -> String {
 
     if let Ok(o) = output {
         let lsof_out = String::from_utf8_lossy(&o.stdout);
-        if let Some(tty) = lsof_out.lines().skip(1).filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.last().map(|s| s.to_string())
-        }).find(|s| s.starts_with("/dev/ttys")) {
+        if let Some(tty) = lsof_out
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                parts.last().map(|s| s.to_string())
+            })
+            .find(|s| s.starts_with("/dev/ttys"))
+        {
             // Find shell processes on the same TTY
             if let Ok(lsof_tty) = std::process::Command::new("lsof").arg(&tty).output() {
                 let tty_out = String::from_utf8_lossy(&lsof_tty.stdout);
@@ -1186,27 +1345,62 @@ fn trace_to_terminal(start_pid: u32) -> Option<String> {
             .ok()?;
         let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
-        if parts.len() < 2 { return None; }
+        if parts.len() < 2 {
+            return None;
+        }
         let comm = parts[1].trim().to_lowercase();
 
-        if comm.contains("iterm") { return Some("iTerm2".to_string()); }
-        if comm.contains("ghostty") { return Some("Ghostty".to_string()); }
-        if comm.contains("warp") { return Some("Warp".to_string()); }
-        if comm.contains("alacritty") { return Some("Alacritty".to_string()); }
-        if comm.contains("kitty") { return Some("kitty".to_string()); }
-        if comm.contains("wezterm") { return Some("WezTerm".to_string()); }
+        if comm.contains("iterm") {
+            return Some("iTerm2".to_string());
+        }
+        if comm.contains("ghostty") {
+            return Some("Ghostty".to_string());
+        }
+        if comm.contains("warp") {
+            return Some("Warp".to_string());
+        }
+        if comm.contains("alacritty") {
+            return Some("Alacritty".to_string());
+        }
+        if comm.contains("kitty") {
+            return Some("kitty".to_string());
+        }
+        if comm.contains("wezterm") {
+            return Some("WezTerm".to_string());
+        }
+        if comm.contains("idea") || comm.contains("intellij") {
+            return Some("IntelliJ IDEA".to_string());
+        }
+        if comm.contains("webstorm") {
+            return Some("WebStorm".to_string());
+        }
+        if comm.contains("pycharm") {
+            return Some("PyCharm".to_string());
+        }
         if comm.contains("terminal") && !comm.contains("login") {
             return Some("Terminal".to_string());
         }
 
         let ppid: u32 = parts[0].trim().parse().ok()?;
-        if ppid <= 1 { return None; }
+        if ppid <= 1 {
+            return None;
+        }
         current = ppid;
     }
     None
 }
 
 fn detect_terminal_app() -> String {
+    // pgrep is unreliable for some apps on macOS (e.g. Ghostty path-based names).
+    // Use ps -eo args and match against known patterns instead.
+    let ps_out = std::process::Command::new("ps")
+        .args(["-eo", "args"])
+        .output();
+    let all_args = match ps_out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_lowercase(),
+        Err(_) => return "Terminal".to_string(),
+    };
+
     let terminals = [
         ("iterm2", "iTerm2"),
         ("ghostty", "Ghostty"),
@@ -1214,19 +1408,94 @@ fn detect_terminal_app() -> String {
         ("alacritty", "Alacritty"),
         ("kitty", "kitty"),
         ("wezterm", "WezTerm"),
-        ("terminal", "Terminal"),
+        ("intellij", "IntelliJ IDEA"),
+        ("webstorm", "WebStorm"),
+        ("pycharm", "PyCharm"),
+        ("terminal.app", "Terminal"),
     ];
     for (pattern, name) in &terminals {
-        let output = std::process::Command::new("pgrep")
-            .args(["-i", pattern])
-            .output();
-        if let Ok(o) = output {
-            if o.status.success() && !o.stdout.is_empty() {
-                return name.to_string();
-            }
+        if all_args.contains(pattern) {
+            return name.to_string();
         }
     }
     "Terminal".to_string()
+}
+
+/// For Ghostty: map a target TTY to a window index by enumerating Ghostty's
+/// direct child processes (login/shell) and their TTYs. The index (1-based)
+/// corresponds to the creation order of windows/tabs, which usually matches
+/// the System Events AXWindows order.
+fn ghostty_tty_to_window_index(tty_path: &str) -> Option<usize> {
+    // Find Ghostty's PID using ps (pgrep is unreliable on macOS for path-based names)
+    let ps_out = std::process::Command::new("ps")
+        .args(["-eo", "pid,args"])
+        .output()
+        .ok()?;
+    let ps_str = String::from_utf8_lossy(&ps_out.stdout);
+    let ghostty_pid: u32 = ps_str
+        .lines()
+        .find(|l| l.to_lowercase().contains("ghostty") && !l.contains("grep"))?
+        .trim()
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+
+    // List all processes, find direct children of Ghostty on a TTY
+    let ps_out = std::process::Command::new("ps")
+        .args(["-eo", "pid,ppid,tty"])
+        .output()
+        .ok()?;
+    let output = String::from_utf8_lossy(&ps_out.stdout);
+
+    let mut children: Vec<(u32, String)> = Vec::new();
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            if let (Ok(pid), Ok(ppid)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                if ppid == ghostty_pid && parts[2].starts_with("ttys") {
+                    children.push((pid, format!("/dev/{}", parts[2])));
+                }
+            }
+        }
+    }
+
+    // Sort by PID (ascending ≈ creation order ≈ window order)
+    children.sort_by_key(|(pid, _)| *pid);
+
+    // Find target TTY → 1-based index
+    children
+        .iter()
+        .position(|(_, tty)| tty == tty_path)
+        .map(|i| i + 1)
+}
+
+/// Raise a specific Ghostty window by index using System Events AXRaise.
+/// Falls back to just activating Ghostty if the index can't be determined.
+fn ghostty_raise_window(tty_path: Option<&str>) {
+    let window_idx = tty_path.and_then(ghostty_tty_to_window_index);
+
+    if let Some(idx) = window_idx {
+        let script = format!(
+            r#"tell application "Ghostty" to activate
+             delay 0.1
+             tell application "System Events"
+                 tell process "Ghostty"
+                     if (count of windows) ≥ {idx} then
+                         perform action "AXRaise" of window {idx}
+                     end if
+                 end tell
+             end tell"#,
+            idx = idx
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
+    } else {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", r#"tell application "Ghostty" to activate"#])
+            .output();
+    }
 }
 
 #[cfg(test)]
@@ -1238,7 +1507,8 @@ mod tests {
             "type": "user",
             "message": { "content": [{ "type": "text", "text": text }] },
             "timestamp": "2026-04-10T00:00:00Z"
-        }).to_string()
+        })
+        .to_string()
     }
 
     fn make_assistant_text(text: &str, stop_reason: &str) -> String {
@@ -1247,7 +1517,8 @@ mod tests {
             "message": { "content": [{ "type": "text", "text": text }] },
             "stop_reason": stop_reason,
             "timestamp": "2026-04-10T00:00:01Z"
-        }).to_string()
+        })
+        .to_string()
     }
 
     fn make_assistant_tool(tool_name: &str) -> String {
@@ -1258,7 +1529,8 @@ mod tests {
                 { "type": "tool_use", "name": tool_name, "input": {} }
             ] },
             "timestamp": "2026-04-10T00:00:01Z"
-        }).to_string()
+        })
+        .to_string()
     }
 
     #[test]
@@ -1270,7 +1542,8 @@ mod tests {
 
     #[test]
     fn user_message_last_returns_waiting_input() {
-        let content = format!("{}\n{}\n{}",
+        let content = format!(
+            "{}\n{}\n{}",
             make_assistant_text("Hello", "end_turn"),
             make_user_msg("Please fix the bug"),
             "" // trailing
@@ -1281,7 +1554,11 @@ mod tests {
 
     #[test]
     fn assistant_with_read_tool_returns_reading() {
-        let content = format!("{}\n{}", make_user_msg("check file"), make_assistant_tool("Read"));
+        let content = format!(
+            "{}\n{}",
+            make_user_msg("check file"),
+            make_assistant_tool("Read")
+        );
         let (activity, tool) = derive_activity_from_content(&content);
         assert_eq!(activity, "reading");
         assert_eq!(tool, Some("Read".to_string()));
@@ -1361,7 +1638,8 @@ mod tests {
 
     #[test]
     fn multiple_messages_uses_last() {
-        let content = format!("{}\n{}\n{}",
+        let content = format!(
+            "{}\n{}\n{}",
             make_assistant_tool("Read"),
             make_assistant_tool("Bash"),
             make_assistant_tool("Write"),

@@ -157,6 +157,46 @@ function App() {
     collapseTimer.current = setTimeout(() => setMode("pill"), 300);
   }, []);
 
+  // ── Safety: collapse when mouse leaves the Tauri window entirely ──
+  // On macOS, clicking another window may not fire mouseLeave on the island
+  // element (especially for always-on-top Accessory windows). This catches
+  // the case where the user moves their cursor away without triggering the
+  // island's onMouseLeave.
+  useEffect(() => {
+    const onWindowMouseLeave = () => {
+      if (isHovering.current) {
+        isHovering.current = false;
+        collapseTimer.current = setTimeout(() => setMode("pill"), 300);
+      }
+    };
+    document.documentElement.addEventListener("mouseleave", onWindowMouseLeave);
+    return () => document.documentElement.removeEventListener("mouseleave", onWindowMouseLeave);
+  }, []);
+
+  // ── Safety: periodic stuck-full detection ──
+  // If the window has been in full mode for 15s without hover, force collapse.
+  // This guards against any edge case where both mouseLeave handlers fail.
+  const fullModeEnteredAt = useRef(0);
+  useEffect(() => {
+    if (mode === "full") {
+      fullModeEnteredAt.current = Date.now();
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    const check = setInterval(() => {
+      if (
+        latestConfig.current.mode === "full" &&
+        !isHovering.current &&
+        fullModeEnteredAt.current > 0 &&
+        Date.now() - fullModeEnteredAt.current > 15_000
+      ) {
+        setMode("pill");
+      }
+    }, 5000);
+    return () => clearInterval(check);
+  }, []);
+
   const autoNotify = useCallback((sessionKey?: string) => {
     if (Date.now() - launchTime.current < 8000) return;
     // Per-session debounce: skip if same sessionKey fired within 30s
@@ -167,6 +207,11 @@ function App() {
       lastAutoNotifyBySession.current.set(sessionKey, now);
     }
     clearTimers();
+    // If the window was stuck in full mode (user already left), reset hover
+    // so the autoCollapse timer below can actually fire.
+    if (!document.hasFocus() || !isHovering.current) {
+      isHovering.current = false;
+    }
     setMode("notification");
     autoCollapseTimer.current = setTimeout(() => {
       if (!isHovering.current) setMode("pill");

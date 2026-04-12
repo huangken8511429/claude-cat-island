@@ -122,13 +122,13 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
 
   if (sessions.length === 0) {
     return (
-      <div className="panel session-panel">
-        <h2 className="panel-title">SESSIONS</h2>
-        <div className="empty-state">
-          <PixelCat state="sleeping" size={3} themeIndex={0} />
-          <p>No active sessions</p>
-        </div>
-      </div>
+       <div className="panel session-panel">
+         <h2 className="panel-title">SESSIONS</h2>
+         <div className="empty-state">
+           <PixelCat state="idle" size={5} themeIndex={0} />
+           <p>No active sessions</p>
+         </div>
+       </div>
     );
   }
 
