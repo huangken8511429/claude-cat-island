@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 import { CatState, ClaudeSession, TokenStats, SkillInfo, PermissionConfig, LiveStats, SessionPendingState, PendingApproval, SessionActivityInfo } from "./types";
 import SessionPanel from "./components/SessionPanel";
@@ -19,6 +20,27 @@ interface LatestNotification {
   ts: number;
   project: string;
   message: string;
+}
+
+interface ToolStatus {
+  toolName: string;
+  label: string;  // e.g. "Read auth.ts" or "Bash npm test"
+  ts: number;
+}
+
+function summarizeToolInput(toolName: string, data: Record<string, unknown>): string {
+  const input = (data.tool_input ?? {}) as Record<string, unknown>;
+  const basename = (p: unknown) => String(p ?? "").split("/").pop() || String(p ?? "");
+  switch (toolName) {
+    case "Read": return basename(input.file_path);
+    case "Write": return basename(input.file_path);
+    case "Edit": return basename(input.file_path);
+    case "Bash": return String(input.command ?? "").slice(0, 30);
+    case "Grep": return `/${input.pattern ?? ""}/ `;
+    case "Glob": return String(input.pattern ?? "");
+    case "Agent": return String(input.description ?? input.prompt ?? "").slice(0, 25);
+    default: return "";
+  }
 }
 
 // ── Pill status indicator components ──
@@ -46,6 +68,7 @@ function App() {
   const [, setAudioReady] = useState(false);
   const [lastNotifText, setLastNotifText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [toolStatuses, setToolStatuses] = useState<Record<string, ToolStatus>>({});
 
   const lastNotifTs = useRef(0);
   const prevAlive = useRef<Map<string, boolean>>(new Map());
@@ -331,6 +354,38 @@ function App() {
     return () => clearInterval(interval);
   }, [refresh]);
 
+  // Real-time updates via Unix socket → Tauri event bridge.
+  // Parses hook events to update per-session tool status instantly,
+  // and triggers a full refresh for state changes.
+  useEffect(() => {
+    const unlisten = listen<{ event: string; ts: number; session_id: string; data: Record<string, unknown> }>(
+      "hook-event",
+      ({ payload }) => {
+        const { event, session_id, data, ts } = payload;
+        if (event === "PreToolUse" && session_id) {
+          const toolName = String(data?.tool_name ?? "");
+          const summary = summarizeToolInput(toolName, data);
+          const label = summary ? `${toolName} ${summary}` : toolName;
+          setToolStatuses((prev) => ({ ...prev, [session_id]: { toolName, label, ts } }));
+        } else if (event === "PostToolUse" && session_id) {
+          setToolStatuses((prev) => {
+            const next = { ...prev };
+            if (next[session_id]) next[session_id] = { toolName: "", label: "Thinking...", ts };
+            return next;
+          });
+        } else if ((event === "Stop" || event === "SessionEnd") && session_id) {
+          setToolStatuses((prev) => {
+            const next = { ...prev };
+            delete next[session_id];
+            return next;
+          });
+        }
+        refresh();
+      }
+    );
+    return () => { unlisten.then((f) => f()); };
+  }, [refresh]);
+
   const handleResolveApproval = async (id: string, behavior: "allow" | "deny") => {
     try {
       await invoke("resolve_approval", {
@@ -378,6 +433,28 @@ function App() {
     return activeSessions > 0 ? "working" : "idle";
   };
 
+  // Derive pill label from socket-pushed tool status, with polling fallback
+  const pillLabel = (() => {
+    if (hasPendingApproval) return "Approval needed";
+    if (hasWaitingForInput) return "Waiting for input";
+    if (aliveSessions.length === 0) return "";
+    // Pick the most recent tool status across all alive sessions
+    const aliveIds = new Set(aliveSessions.map((s) => s.sessionId));
+    const relevantStatuses = Object.entries(toolStatuses)
+      .filter(([sid]) => aliveIds.has(sid))
+      .sort(([, a], [, b]) => b.ts - a.ts);
+    if (relevantStatuses.length > 0) return relevantStatuses[0][1].label;
+    // Fallback: derive from polling-based activity
+    const firstActivity = aliveSessions
+      .map((s) => activities[s.sessionId])
+      .find((a) => a && a.activity !== "idle");
+    if (firstActivity) {
+      const name = firstActivity.toolName ? ` ${firstActivity.toolName}` : "";
+      return firstActivity.activity.replace("_", " ") + name;
+    }
+    return "Working...";
+  })();
+
   // Determine island glow state
   const glowClass = needsAttention.length > 0
     ? "island-glow-approval"
@@ -391,34 +468,18 @@ function App() {
 
         {/* ── Pill content (always rendered, visible in pill mode) ── */}
         <div className="pill-content">
-          {/* Mini cat stack for multiple sessions */}
-          {aliveSessions.length > 1 ? (
-            <div className="pill-cat-stack">
-              {aliveSessions.map((s, i) => (
-                <CatLogo
-                  key={s.sessionId}
-                  state={getPillCatState(s.sessionId)}
-                  size={16}
-                  themeIndex={i}
-                />
-              ))}
-            </div>
-          ) : (
-            <CatLogo
-              state={getPillCatState()}
-              size={24}
-            />
+          <CatLogo state={getPillCatState()} size={20} />
+          {hasPendingApproval ? (
+            <PillAmberDot />
+          ) : isAnyProcessing ? (
+            <PillSpinner />
+          ) : hasWaitingForInput ? (
+            <PillGreenCheck />
+          ) : null}
+          {pillLabel && <span className="pill-label">{pillLabel}</span>}
+          {aliveSessions.length > 1 && (
+            <span className="pill-badge">{aliveSessions.length}</span>
           )}
-          {/* Aggregated status indicator (priority: approval > processing > waiting) */}
-          <div className="pill-status">
-            {hasPendingApproval ? (
-              <PillAmberDot />
-            ) : isAnyProcessing ? (
-              <PillSpinner />
-            ) : hasWaitingForInput ? (
-              <PillGreenCheck />
-            ) : null}
-          </div>
         </div>
 
         {/* ── Pill progress bar ── */}

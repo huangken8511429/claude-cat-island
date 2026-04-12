@@ -1,5 +1,6 @@
 mod claude;
 mod approval;
+mod socket;
 
 use approval::{ApprovalDecision, ApprovalServer, PendingApproval};
 use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PermissionConfig, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
@@ -233,9 +234,12 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // ── Install hook if needed ──
-            if let Err(e) = claude::install_approval_hook() {
-                eprintln!("[approval] Failed to install hook: {}", e);
+            // ── Start Unix socket server for hook events ──
+            socket::start(app.handle().clone());
+
+            // ── Install hooks (approval + bridge) ──
+            if let Err(e) = claude::install_hooks() {
+                eprintln!("[hooks] Failed to install hooks: {}", e);
             }
 
             Ok(())

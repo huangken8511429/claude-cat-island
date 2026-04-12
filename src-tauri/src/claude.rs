@@ -1226,71 +1226,154 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
     Ok("clipboard_only".to_string())
 }
 
-/// Install the PermissionRequest hook into Claude Code's user settings
-pub fn install_approval_hook() -> Result<(), Box<dyn std::error::Error>> {
+/// Install all hooks into Claude Code's user settings:
+/// - PermissionRequest → curl to HTTP approval server (existing)
+/// - Other events → Python bridge script → Unix socket
+pub fn install_hooks() -> Result<(), Box<dyn std::error::Error>> {
     let home = std::env::var("HOME")?;
     let settings_path = format!("{}/.claude/settings.json", home);
 
-    // Read existing settings or create new
+    // Deploy the Python bridge script
+    let bridge_dir = format!("{}/.claude-cat-monitor/bin", home);
+    fs::create_dir_all(&bridge_dir)?;
+    let bridge_path = format!("{}/cat-bridge.py", bridge_dir);
+    let bridge_script = include_str!("../resources/cat-bridge.py");
+    fs::write(&bridge_path, bridge_script)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&bridge_path, fs::Permissions::from_mode(0o755))?;
+    }
+    eprintln!("[hooks] Deployed bridge script to {}", bridge_path);
+
     let mut settings: serde_json::Value = if std::path::Path::new(&settings_path).exists() {
-        let content = std::fs::read_to_string(&settings_path)?;
+        let content = fs::read_to_string(&settings_path)?;
         serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
 
-    // Check if our hook already exists
-    let hook_command = "curl -s -X POST http://127.0.0.1:57000/hooks/permission-request -H 'Content-Type: application/json' -d \"$(cat)\" --max-time 300";
-
-    if let Some(hooks) = settings.get("hooks") {
-        if let Some(pr_hooks) = hooks.get("PermissionRequest") {
-            if let Some(arr) = pr_hooks.as_array() {
-                for entry in arr {
-                    if let Some(hooks_arr) = entry.get("hooks").and_then(|h| h.as_array()) {
-                        for h in hooks_arr {
-                            if let Some(cmd) = h.get("command").and_then(|c| c.as_str()) {
-                                if cmd.contains("127.0.0.1:57000") {
-                                    eprintln!("[approval] Hook already installed");
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Add our hook
-    let our_hook = serde_json::json!({
-        "matcher": "",
-        "hooks": [{
-            "type": "command",
-            "command": hook_command,
-            "timeout": 300
-        }]
-    });
-
     if settings.get("hooks").is_none() {
         settings["hooks"] = serde_json::json!({});
     }
 
+    let bridge_cmd = format!("python3 {} ", bridge_path);
+    let mut changed = false;
+
+    // Remove old shell-based cat-bridge hooks (replaced by cat-bridge.py)
+    changed |= remove_hooks_matching(&mut settings, "cat-bridge", "cat-bridge.py");
+
+    // PermissionRequest: keep the curl-based HTTP hook (approval server)
+    let approval_cmd = "curl -s -X POST http://127.0.0.1:57000/hooks/permission-request -H 'Content-Type: application/json' -d \"$(cat)\" --max-time 300";
+    if !hook_exists(&settings, "PermissionRequest", "127.0.0.1:57000") {
+        append_hook(&mut settings, "PermissionRequest", serde_json::json!({
+            "matcher": "",
+            "hooks": [{"type": "command", "command": approval_cmd, "timeout": 300}]
+        }));
+        changed = true;
+    }
+
+    // Bridge hooks for real-time event push via Unix socket
+    let bridge_events = [
+        ("SessionStart", ""),
+        ("SessionEnd", ""),
+        ("Stop", ""),
+        ("Notification", "*"),
+        ("PreToolUse", "*"),
+        ("PostToolUse", "*"),
+        ("UserPromptSubmit", ""),
+        ("SubagentStart", ""),
+        ("SubagentStop", ""),
+        ("PreCompact", ""),
+    ];
+
+    for (event, matcher) in bridge_events {
+        let marker = "cat-bridge.py";
+        if !hook_exists(&settings, event, marker) {
+            let cmd = format!("{}{}", bridge_cmd, event);
+            let mut hook = serde_json::json!({
+                "hooks": [{"type": "command", "command": cmd}]
+            });
+            if !matcher.is_empty() {
+                hook["matcher"] = serde_json::json!(matcher);
+            }
+            append_hook(&mut settings, event, hook);
+            changed = true;
+        }
+    }
+
+    if changed {
+        let formatted = serde_json::to_string_pretty(&settings)?;
+        fs::write(&settings_path, formatted)?;
+        eprintln!("[hooks] Hooks installed to {}", settings_path);
+    } else {
+        eprintln!("[hooks] All hooks already installed");
+    }
+
+    Ok(())
+}
+
+/// Remove hook entries whose command contains `marker` but NOT `exclude`.
+/// Used to clean up old shell bridge hooks when migrating to Python bridge.
+fn remove_hooks_matching(settings: &mut serde_json::Value, marker: &str, exclude: &str) -> bool {
+    let mut changed = false;
+    if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        for (_event, entries) in hooks.iter_mut() {
+            if let Some(arr) = entries.as_array_mut() {
+                let before = arr.len();
+                arr.retain(|entry| {
+                    let dominated = entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map_or(false, |hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map_or(false, |cmd| cmd.contains(marker) && !cmd.contains(exclude))
+                            })
+                        });
+                    !dominated
+                });
+                if arr.len() < before {
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn hook_exists(settings: &serde_json::Value, event: &str, marker: &str) -> bool {
+    settings
+        .get("hooks")
+        .and_then(|h| h.get(event))
+        .and_then(|v| v.as_array())
+        .map_or(false, |arr| {
+            arr.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map_or(false, |hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .map_or(false, |cmd| cmd.contains(marker))
+                        })
+                    })
+            })
+        })
+}
+
+fn append_hook(settings: &mut serde_json::Value, event: &str, hook: serde_json::Value) {
     let existing = settings["hooks"]
-        .get("PermissionRequest")
+        .get(event)
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-
-    let mut new_hooks = existing;
-    new_hooks.push(our_hook);
-    settings["hooks"]["PermissionRequest"] = serde_json::Value::Array(new_hooks);
-
-    // Write back
-    let formatted = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(&settings_path, formatted)?;
-    eprintln!("[approval] Hook installed to {}", settings_path);
-
-    Ok(())
+    let mut hooks = existing;
+    hooks.push(hook);
+    settings["hooks"][event] = serde_json::Value::Array(hooks);
 }
 
 /// Detect which terminal app owns a specific PID by tracing the process tree.
