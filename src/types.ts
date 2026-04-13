@@ -112,6 +112,23 @@ export interface SessionPendingState {
   ts: number;
 }
 
+// ── AskUserQuestion Types ──
+
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface PendingQuestion {
+  sessionId: string;
+  pid: number;
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
+  toolUseId: string;
+}
+
 // ── Approval System Types ──
 
 /** Raw hook input from Claude Code PermissionRequest */

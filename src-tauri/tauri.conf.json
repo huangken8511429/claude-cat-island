@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Claude Cat Monitor",
-        "width": 240,
-        "height": 36,
+        "width": 350,
+        "height": 500,
         "resizable": false,
         "decorations": false,
         "transparent": true,

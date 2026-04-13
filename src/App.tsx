@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
-import { CatState, ClaudeSession, TokenStats, SkillInfo, PermissionConfig, LiveStats, SessionPendingState, PendingApproval, SessionActivityInfo } from "./types";
+// Window API no longer needed — window is fixed-size, Rust handles click-through
+import { CatState, ClaudeSession, TokenStats, SkillInfo, PermissionConfig, LiveStats, SessionPendingState, PendingApproval, PendingQuestion, SessionActivityInfo } from "./types";
 import SessionPanel from "./components/SessionPanel";
 import TokenPanel from "./components/TokenPanel";
 import SkillPanel from "./components/SkillPanel";
@@ -51,6 +51,7 @@ const PillGreenCheck = () => (
     <path d="M3 8 L7 12 L13 4" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
+const PillQuestionMark = () => <div className="pill-question-mark" aria-label="question pending">?</div>;
 
 function App() {
   const [mode, setMode] = useState<IslandMode>("pill");
@@ -62,6 +63,7 @@ function App() {
   const [live, setLive] = useState<LiveStats | null>(null);
   const [pendingStates, setPendingStates] = useState<SessionPendingState[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [activities, setActivities] = useState<Record<string, SessionActivityInfo>>({});
   const [inDetail, setInDetail] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -69,6 +71,7 @@ function App() {
   const [lastNotifText, setLastNotifText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [toolStatuses, setToolStatuses] = useState<Record<string, ToolStatus>>({});
+  const [notchInfo, setNotchInfo] = useState<{ has_notch: boolean; notch_width: number; notch_height: number; pill_width: number } | null>(null);
 
   const lastNotifTs = useRef(0);
   const prevAlive = useRef<Map<string, boolean>>(new Map());
@@ -79,9 +82,14 @@ function App() {
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isHovering = useRef(false);
   const autoCollapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevMode = useRef<IslandMode>("pill");
-
   const islandRef = useRef<HTMLDivElement>(null);
+
+  // Fetch notch info once on mount
+  useEffect(() => {
+    invoke<{ has_notch: boolean; notch_width: number; notch_height: number; pill_width: number }>("get_notch_info")
+      .then(setNotchInfo)
+      .catch(() => setNotchInfo({ has_notch: false, notch_width: 0, notch_height: 0, pill_width: 240 }));
+  }, []);
   const lastAutoNotifyBySession = useRef<Map<string, number>>(new Map());
   const approvalFirstSeen = useRef<Map<string, number>>(new Map());
   const lastApprovalBlipTs = useRef(0);
@@ -96,72 +104,37 @@ function App() {
   useEffect(() => {
     invoke("set_skip_dangerous", { enabled: true }).catch(() => {});
     invoke("set_auto_approve", { enabled: true }).catch(() => {});
+    // Re-center window after all macOS setup completes
+    invoke("center_window").catch(() => {});
   }, []);
 
-  // ── latestConfig ref keeps the transitionend listener free of stale closures ──
-  const latestConfig = useRef({ mode, sessionCount: sessions.length, inDetail });
-  useEffect(() => {
-    latestConfig.current = { mode, sessionCount: sessions.length, inDetail };
-  }, [mode, sessions.length, inDetail]);
+  // ── Track mode in a ref for setInterval callbacks ──
+  const latestMode = useRef(mode);
+  useEffect(() => { latestMode.current = mode; }, [mode]);
 
-  // ── Compute target window size from latestConfig and apply it ──
-  // Window bounds = island bounds, so only the island captures mouse events.
-  const resizeWindowToTarget = useCallback(async () => {
-    const cfg = latestConfig.current;
+  // ── Island dimensions (inline style — CSS transition animates changes) ──
+  const computeIslandSize = () => {
     let w: number, h: number;
-    if (cfg.mode === "pill") {
-      w = 240; h = 36;
-    } else if (cfg.mode === "notification") {
-      w = 350; h = 68;
-    } else if (cfg.inDetail) {
-      // Detail mode: maximize height for transcript reading
-      w = 340; h = 620;
+    if (mode === "pill") {
+      w = notchInfo?.has_notch ? notchInfo.notch_width + 60 : 240;
+      h = notchInfo?.has_notch ? notchInfo.notch_height + 25 : 36;
+    } else if (mode === "notification") {
+      w = Math.max(340, notchInfo?.has_notch ? notchInfo.notch_width + 80 : 340);
+      h = 68;
     } else {
-      // Full mode: grow with session count, clamped 200–500
       w = 340;
-      h = Math.min(500, Math.max(200, 120 + cfg.sessionCount * 52));
+      h = inDetail ? 480 : Math.min(400, Math.max(180, 100 + sessions.length * 48));
     }
-    try {
-      const appWindow = getCurrentWindow();
-      const monitor = await currentMonitor();
-      if (!monitor) return;
-      const screenW = monitor.size.width / monitor.scaleFactor;
-      // Shift slightly left from center so the cat clears the notch
-      const x = Math.round((screenW - w) / 2 - 20);
-      await appWindow.setSize(new LogicalSize(w, h));
-      await appWindow.setPosition(new LogicalPosition(x, 0));
-    } catch {}
-  }, []);
+    return { w, h };
+  };
+  const { w: islandWidth, h: islandHeight } = computeIslandSize();
 
-  // ── Resize on mode change ──
-  // Expand: resize immediately so the Tauri window has room before the CSS
-  // island grows into it. Otherwise the island would exceed the transparent
-  // window bounds during the 400ms transition and get clipped mid-animation —
-  // visible as a distorted pill when autoNotify fires from pill mode.
-  // Collapse: defer to the transitionend listener below so the shrinking
-  // island stays inside the window until the animation completes.
+  // ── Sync island bounds to Rust for click-through toggling ──
   useEffect(() => {
-    const prev = prevMode.current;
-    const isExpand =
-      mode === "full" || (mode === "notification" && prev === "pill");
-    if (isExpand) {
-      resizeWindowToTarget();
-    }
-    prevMode.current = mode;
-  }, [mode, sessions.length, inDetail, resizeWindowToTarget]);
-
-  // ── transitionend listener on .island for deferred (collapse) resize ──
-  useEffect(() => {
-    const el = islandRef.current;
-    if (!el) return;
-    const onEnd = (e: TransitionEvent) => {
-      if (e.target !== el) return;             // ignore child bubbling
-      if (e.propertyName !== "width") return;  // dedupe height / border-radius
-      resizeWindowToTarget();
-    };
-    el.addEventListener("transitionend", onEnd);
-    return () => el.removeEventListener("transitionend", onEnd);
-  }, [resizeWindowToTarget]);
+    const windowW = notchInfo?.has_notch ? notchInfo.pill_width : 350;
+    const x = (windowW - islandWidth) / 2;
+    invoke("update_island_bounds", { x, y: 0, w: islandWidth, h: islandHeight }).catch(() => {});
+  }, [islandWidth, islandHeight, notchInfo]);
 
   // ── Mode transitions (CSS only, no window resize) ──
   const clearTimers = () => {
@@ -209,7 +182,7 @@ function App() {
   useEffect(() => {
     const check = setInterval(() => {
       if (
-        latestConfig.current.mode === "full" &&
+        latestMode.current === "full" &&
         !isHovering.current &&
         fullModeEnteredAt.current > 0 &&
         Date.now() - fullModeEnteredAt.current > 15_000
@@ -243,7 +216,7 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, t, sk, p, ls, notif, ps, pa] = await Promise.all([
+      const [s, t, sk, p, ls, notif, ps, pa, pq] = await Promise.all([
         invoke<ClaudeSession[]>("get_sessions"),
         invoke<TokenStats>("get_token_stats"),
         invoke<SkillInfo[]>("get_skills"),
@@ -252,8 +225,9 @@ function App() {
         invoke<LatestNotification>("get_latest_notification"),
         invoke<SessionPendingState[]>("get_session_pending_states"),
         invoke<PendingApproval[]>("get_pending_approvals").catch(() => [] as PendingApproval[]),
+        invoke<PendingQuestion[]>("get_pending_questions").catch(() => [] as PendingQuestion[]),
       ]);
-      setSessions(s); setStats(t); setSkills(sk); setPermissions(p); setLive(ls); setPendingStates(ps); setPendingApprovals(pa);
+      setSessions(s); setStats(t); setSkills(sk); setPermissions(p); setLive(ls); setPendingStates(ps); setPendingApprovals(pa); setPendingQuestions(pq);
       failCount.current = 0;
       if (error) setError(null);
 
@@ -342,7 +316,8 @@ function App() {
 
         prevPendingIds.current = new Set(ps.map((pp) => pp.session_id));
       }
-    } catch {
+    } catch (e) {
+      console.error("[refresh] error:", e);
       failCount.current++;
       if (failCount.current >= 3) setError("Backend unreachable");
     }
@@ -408,8 +383,9 @@ function App() {
 
   const aliveSessions = sessions.filter((s) => s.isAlive);
   const activeSessions = aliveSessions.length;
+  const questionSessionIds = new Set(pendingQuestions.map((q) => q.sessionId));
   const needsAttention = pendingStates.filter(
-    (ps) => ps.pending === "needs_approval" && sessions.some((s) => s.sessionId === ps.session_id && s.isAlive)
+    (ps) => ps.pending === "needs_approval" && !questionSessionIds.has(ps.session_id) && sessions.some((s) => s.sessionId === ps.session_id && s.isAlive)
   );
   const waitingInput = pendingStates.filter(
     (ps) => ps.pending === "waiting_input" && sessions.some((s) => s.sessionId === ps.session_id && s.isAlive)
@@ -417,25 +393,33 @@ function App() {
 
   // ── Aggregate booleans for pill status indicator ──
   const hasPendingApproval = needsAttention.length > 0;
+  const hasPendingQuestion = pendingQuestions.length > 0;
   const hasWaitingForInput = waitingInput.length > 0;
   const isAnyProcessing = aliveSessions.some((s) => {
     const a = activities[s.sessionId]?.activity;
     return a === "reading" || a === "writing" || a === "building" || a === "searching" || a === "thinking";
   });
 
-  // Derive pill CatLogo emotion state (safe — always returns a valid state)
-  const getPillCatState = (_sessionId?: string): CatState => {
+  // Derive pill CatLogo emotion state per session
+  const getSessionCatState = (session: ClaudeSession): CatState => {
     try {
+      // Global: rate limit applies to all
       if (live?.rateLimits?.five_hour?.used_percentage != null && live.rateLimits.five_hour.used_percentage > 80) return "sweating";
-      if (needsAttention.length > 0) return "anxious";
-      if (activeSessions > 0) return "working";
+      // Per-session: needs approval?
+      const ps = pendingStates.find((p) => p.session_id === session.sessionId);
+      if (ps?.pending === "needs_approval") return "anxious";
+      if (ps?.pending === "waiting_input") return "idle";
+      // Per-session: activity?
+      const act = activities[session.sessionId]?.activity;
+      if (act === "reading" || act === "writing" || act === "building" || act === "searching" || act === "thinking") return "working";
     } catch { /* fallback */ }
-    return activeSessions > 0 ? "working" : "idle";
+    return "idle";
   };
 
   // Derive pill label from socket-pushed tool status, with polling fallback
   const pillLabel = (() => {
     if (hasPendingApproval) return "Approval needed";
+    if (hasPendingQuestion) return pendingQuestions[0].header || "Question";
     if (hasWaitingForInput) return "Waiting for input";
     if (aliveSessions.length === 0) return "";
     // Pick the most recent tool status across all alive sessions
@@ -458,28 +442,45 @@ function App() {
   // Determine island glow state
   const glowClass = needsAttention.length > 0
     ? "island-glow-approval"
+    : hasPendingQuestion
+    ? "island-glow-question"
     : activeSessions > 0
     ? "island-glow-working"
     : "";
 
   return (
     <div className="island-container">
-      <div ref={islandRef} className={`island island-${mode} ${glowClass}`} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
+      <div ref={islandRef} className={`island island-${mode} ${glowClass} ${notchInfo?.has_notch ? "island-notch" : ""}`} style={{ width: islandWidth, height: islandHeight, ...(notchInfo?.has_notch ? { "--notch-h": `${notchInfo.notch_height}px` } : {}) } as React.CSSProperties} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
 
         {/* ── Pill content (always rendered, visible in pill mode) ── */}
-        <div className="pill-content">
-          <CatLogo state={getPillCatState()} size={20} />
-          {hasPendingApproval ? (
-            <PillAmberDot />
-          ) : isAnyProcessing ? (
-            <PillSpinner />
-          ) : hasWaitingForInput ? (
-            <PillGreenCheck />
-          ) : null}
-          {pillLabel && <span className="pill-label">{pillLabel}</span>}
-          {aliveSessions.length > 1 && (
-            <span className="pill-badge">{aliveSessions.length}</span>
+        <div className={`pill-content ${notchInfo?.has_notch ? "pill-notch" : ""}`}>
+          <div className="pill-left">
+            {aliveSessions.length > 0 ? (
+              aliveSessions.slice(0, 5).map((s, i) => (
+                <CatLogo key={s.sessionId} state={getSessionCatState(s)} size={20} themeIndex={i} />
+              ))
+            ) : (
+              <CatLogo state="idle" size={20} />
+            )}
+            {aliveSessions.length > 5 && (
+              <span className="pill-badge">+{aliveSessions.length - 5}</span>
+            )}
+          </div>
+          {notchInfo?.has_notch && (
+            <div className="pill-notch-spacer" style={{ width: notchInfo.notch_width }} />
           )}
+          <div className="pill-right">
+            {hasPendingApproval ? (
+              <PillAmberDot />
+            ) : hasPendingQuestion ? (
+              <PillQuestionMark />
+            ) : isAnyProcessing ? (
+              <PillSpinner />
+            ) : hasWaitingForInput ? (
+              <PillGreenCheck />
+            ) : null}
+            {pillLabel && <span className="pill-label">{pillLabel}</span>}
+          </div>
         </div>
 
         {/* ── Pill progress bar ── */}
@@ -495,8 +496,10 @@ function App() {
             <div className="notif-msg">
               {pendingApprovals.length > 0
                 ? `${pendingApprovals[0].toolName}: ${pendingApprovals[0].toolName === "Bash"
-                    ? String(pendingApprovals[0].toolInput.command ?? "").slice(0, 50)
-                    : String(pendingApprovals[0].toolInput.file_path ?? pendingApprovals[0].toolName).slice(0, 50)}`
+                    ? String(pendingApprovals[0].toolInput?.command ?? "").slice(0, 50)
+                    : String(pendingApprovals[0].toolInput?.file_path ?? pendingApprovals[0].toolName).slice(0, 50)}`
+                : hasPendingQuestion
+                ? pendingQuestions[0].header || pendingQuestions[0].question.slice(0, 50)
                 : toast || lastNotifText || "Notification"}
             </div>
             {pendingApprovals.length > 0 ? (
@@ -512,6 +515,11 @@ function App() {
                   refresh();
                 }}>ALLOW</button>
               </div>
+            ) : hasPendingQuestion ? (
+              <button className="notif-jump question" onClick={() => {
+                setMode("full");
+                setTab("sessions");
+              }}>SELECT</button>
             ) : needsAttention.length > 0 ? (
               <button className="notif-jump" onClick={() => {
                 const sid = needsAttention[0].session_id;
@@ -550,7 +558,7 @@ function App() {
               </div>
             )}
             <main className="content">
-              {tab === "sessions" && <SessionPanel sessions={sessions} pendingStates={pendingStates} pendingApprovals={pendingApprovals} onResolveApproval={handleResolveApproval} onDetailChange={setInDetail} />}
+              {tab === "sessions" && <SessionPanel sessions={sessions} pendingStates={pendingStates} pendingApprovals={pendingApprovals} pendingQuestions={pendingQuestions} onResolveApproval={handleResolveApproval} onRefresh={refresh} onDetailChange={setInDetail} />}
               {tab === "tokens" && <TokenPanel stats={stats} live={live} />}
               {tab === "skills" && <SkillPanel skills={skills} onDetailChange={setInDetail} />}
               {tab === "permissions" && (

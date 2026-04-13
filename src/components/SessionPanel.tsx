@@ -1,16 +1,20 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ClaudeSession, CatState, SessionPendingState, TranscriptMessage, PendingApproval } from "../types";
-import PixelCat from "./PixelCat";
+import { ClaudeSession, CatState, SessionPendingState, TranscriptMessage, PendingApproval, PendingQuestion } from "../types";
+import Lottie from "lottie-react";
+import sleepingCatAnimation from "../assets/sleeping-cat.json";
 import CatLogo from "./CatLogo";
 import SessionDetail from "./SessionDetail";
 import QuickReply from "./QuickReply";
+import QuestionPanel from "./QuestionPanel";
 
 interface Props {
   sessions: ClaudeSession[];
   pendingStates: SessionPendingState[];
   pendingApprovals: PendingApproval[];
+  pendingQuestions: PendingQuestion[];
   onResolveApproval: (id: string, behavior: "allow" | "deny") => void;
+  onRefresh?: () => void;
   onDetailChange?: (inDetail: boolean) => void;
 }
 
@@ -71,20 +75,20 @@ async function handleJump(pid: number) {
   }
 }
 
-function summarizeApproval(toolName: string, toolInput: Record<string, unknown>): string {
+function summarizeApproval(toolName: string, toolInput?: Record<string, unknown>): string {
   switch (toolName) {
     case "Bash":
-      return `$ ${toolInput.command ?? ""}`;
+      return `$ ${toolInput?.command ?? ""}`;
     case "Write":
-      return `Write ${toolInput.file_path ?? ""}`;
+      return `Write ${toolInput?.file_path ?? ""}`;
     case "Edit":
-      return `Edit ${toolInput.file_path ?? ""}`;
+      return `Edit ${toolInput?.file_path ?? ""}`;
     default:
       return toolName;
   }
 }
 
-export default function SessionPanel({ sessions, pendingStates, pendingApprovals, onResolveApproval, onDetailChange }: Props) {
+export default function SessionPanel({ sessions, pendingStates, pendingApprovals, pendingQuestions, onResolveApproval, onRefresh, onDetailChange }: Props) {
   const [selected, setSelected] = useState<{ session: ClaudeSession; index: number } | null>(null);
   const [lastMessages, setLastMessages] = useState<Record<string, TranscriptMessage>>({});
 
@@ -125,7 +129,11 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
        <div className="panel session-panel">
          <h2 className="panel-title">SESSIONS</h2>
          <div className="empty-state">
-           <PixelCat state="idle" size={5} themeIndex={0} />
+           <Lottie
+             animationData={sleepingCatAnimation}
+             loop={true}
+             style={{ width: 120, height: 120 }}
+           />
            <p>No active sessions</p>
          </div>
        </div>
@@ -137,17 +145,26 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
       <h2 className="panel-title">
         SESSIONS <span className="badge">{sessions.length}</span>
       </h2>
+      {pendingQuestions.length > 0 && (
+        <div className="question-section">
+          {pendingQuestions.map((q) => (
+            <QuestionPanel key={q.toolUseId} question={q} onAnswered={onRefresh} />
+          ))}
+        </div>
+      )}
       <div className="session-grid">
         {sessions.map((session, i) => {
           const pending = pendingStates.find((ps) => ps.session_id === session.sessionId);
           const lastMsg = lastMessages[session.sessionId];
+          const sessionQuestion = pendingQuestions.find(q => q.sessionId === session.sessionId);
           const state = getState(session, pending, lastMsg);
-          const isApproval = pending?.pending === "needs_approval" && session.isAlive;
+          const isApproval = pending?.pending === "needs_approval" && session.isAlive && !sessionQuestion;
           const isWaiting = pending?.pending === "waiting_input" && session.isAlive;
+          const isQuestion = !!sessionQuestion && session.isAlive;
           return (
             <div
               key={session.sessionId}
-              className={`session-card state-${state} ${isApproval ? "state-attention" : ""} ${isWaiting ? "state-waiting" : ""} clickable`}
+              className={`session-card state-${state} ${isApproval ? "state-attention" : ""} ${isWaiting ? "state-waiting" : ""} ${isQuestion ? "state-question" : ""} clickable`}
               role="button"
               tabIndex={0}
               onClick={() => { setSelected({ session, index: i }); onDetailChange?.(true); }}
@@ -162,12 +179,13 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
               <div className="session-info">
                 <div className="session-project">
                   {getProjectName(session.cwd)}
+                  {isQuestion && <span className="pending-badge question">QUESTION</span>}
                   {isApproval && <span className="pending-badge approve">APPROVE</span>}
-                  {isWaiting && <span className="pending-badge ask">ASK</span>}
+                  {isWaiting && !isQuestion && <span className="pending-badge ask">ASK</span>}
                 </div>
                 <div className="session-meta">
                   <span className={`status-dot ${state}`} />
-                  <span>{isApproval ? "NEEDS APPROVAL" : isWaiting ? "WAITING INPUT" : state.toUpperCase()}</span>
+                  <span>{isQuestion ? "QUESTION" : isApproval ? "NEEDS APPROVAL" : isWaiting ? "WAITING INPUT" : state.toUpperCase()}</span>
                   {pending?.tool_name && (
                     <>
                       <span className="sep">|</span>
@@ -186,7 +204,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
                   </div>
                 )}
               </div>
-              {(isApproval || isWaiting) && (
+              {(isApproval || isWaiting) && !isQuestion && (
                 <button
                   className={`jump-btn ${isApproval ? "approve" : "ask"}`}
                   onClick={(e) => {
@@ -225,9 +243,9 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
                   ))}
                 </div>
               )}
-              {isWaiting && (
+              {isWaiting && !isQuestion ? (
                 <QuickReply pid={session.pid} />
-              )}
+              ) : null}
             </div>
           );
         })}

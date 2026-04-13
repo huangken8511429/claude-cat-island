@@ -1009,6 +1009,178 @@ pub fn read_session_pending_states() -> Result<Vec<SessionPendingState>, Box<dyn
     Ok(states)
 }
 
+// ── AskUserQuestion Detection ──
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PendingQuestion {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub pid: u32,
+    pub question: String,
+    #[serde(default)]
+    pub header: String,
+    pub options: Vec<QuestionOption>,
+    #[serde(rename = "multiSelect")]
+    pub multi_select: bool,
+    #[serde(rename = "toolUseId")]
+    pub tool_use_id: String,
+}
+
+/// Detect unanswered AskUserQuestion from session transcripts.
+/// Checks all alive sessions — AskUserQuestion triggers `permission_prompt`
+/// notifications, not just `waiting_input` Stop events.
+pub fn read_pending_questions() -> Result<Vec<PendingQuestion>, Box<dyn std::error::Error>> {
+    let sessions = read_sessions()?;
+    let mut questions = Vec::new();
+
+    for session in &sessions {
+        if !session.is_alive {
+            continue;
+        }
+
+        if let Some(q) = detect_ask_user_question(&session.session_id, &session.cwd, session.pid)? {
+            questions.push(q);
+        }
+    }
+
+    Ok(questions)
+}
+
+/// Read the tail of a transcript and look for an unanswered AskUserQuestion tool_use.
+fn detect_ask_user_question(
+    session_id: &str,
+    cwd: &str,
+    pid: u32,
+) -> Result<Option<PendingQuestion>, Box<dyn std::error::Error>> {
+    let transcript_path = match find_transcript_path(session_id, cwd) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let file = fs::File::open(&transcript_path)?;
+    let file_len = file.metadata()?.len();
+    let tail_size: u64 = 32 * 1024;
+    let content = if file_len > tail_size {
+        use std::io::{Read as IoRead, Seek, SeekFrom};
+        let mut f = file;
+        f.seek(SeekFrom::End(-(tail_size as i64)))?;
+        let mut buf = String::new();
+        f.read_to_string(&mut buf)?;
+        if let Some(pos) = buf.find('\n') {
+            buf.drain(..=pos);
+        }
+        buf
+    } else {
+        fs::read_to_string(&transcript_path)?
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut last_ask: Option<(String, serde_json::Value)> = None;
+    let mut answered_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in &lines {
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        if msg_type == "user" {
+            if let Some(content_arr) = val.pointer("/message/content").and_then(|v| v.as_array()) {
+                for block in content_arr {
+                    if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+                        if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
+                            answered_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if msg_type == "assistant" {
+            if let Some(content_arr) = val.pointer("/message/content").and_then(|v| v.as_array()) {
+                for block in content_arr {
+                    if block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                        && block.get("name").and_then(|v| v.as_str()) == Some("AskUserQuestion")
+                    {
+                        if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+                            let input = block.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                            last_ask = Some((id.to_string(), input));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some((tool_use_id, input)) = last_ask {
+        if answered_ids.contains(&tool_use_id) {
+            return Ok(None);
+        }
+
+        let questions_arr = input.get("questions").and_then(|v| v.as_array());
+        if let Some(questions_arr) = questions_arr {
+            if let Some(first_q) = questions_arr.first() {
+                let question = first_q
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let header = first_q
+                    .get("header")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let multi_select = first_q
+                    .get("multiSelect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                let options = first_q
+                    .get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|opt| QuestionOption {
+                                label: opt
+                                    .get("label")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                description: opt
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                return Ok(Some(PendingQuestion {
+                    session_id: session_id.to_string(),
+                    pid,
+                    question,
+                    header,
+                    options,
+                    multi_select,
+                    tool_use_id,
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 // ── Jump to Terminal ──
 
 pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
@@ -1107,6 +1279,166 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Send arrow-key navigation to select an option in an interactive prompt.
+/// Uses terminal-specific AppleScript to write escape sequences to the process input.
+/// `down_presses`: number of down-arrow key presses before Enter.
+pub fn select_option(pid: u32, down_presses: u32) -> Result<String, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-a", "-d", "0"])
+        .output()?;
+
+    let lsof_out = String::from_utf8_lossy(&output.stdout);
+    let tty = lsof_out
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts.last().map(|s| s.to_string())
+        })
+        .find(|s| s.starts_with("/dev/ttys"));
+
+    let terminal_app = detect_terminal_for_pid(pid);
+
+    if let Some(ref tty_path) = tty {
+        match terminal_app.as_str() {
+            "iTerm2" | "iTerm" => {
+                // Build arrow key sends: (ASCII character 27) & "[B" = ESC[B = down arrow
+                let mut arrow_cmds = String::new();
+                for i in 0..down_presses {
+                    arrow_cmds.push_str(
+                        "tell s to write text (ASCII character 27) & \"[B\" without newline\n"
+                    );
+                    if i < down_presses - 1 {
+                        arrow_cmds.push_str("delay 0.06\n");
+                    }
+                }
+
+                let script = format!(
+                    r#"tell application "iTerm2"
+                         repeat with w in windows
+                             repeat with t in tabs of w
+                                 repeat with s in sessions of t
+                                     if tty of s contains "{tty}" then
+                                         select t
+                                         set index of w to 1
+                                         {arrows}
+                                         delay 0.1
+                                         tell s to write text ""
+                                         return "sent"
+                                     end if
+                                 end repeat
+                             end repeat
+                         end repeat
+                     end tell"#,
+                    tty = tty_path,
+                    arrows = arrow_cmds,
+                );
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .output();
+                return Ok("auto_sent".to_string());
+            }
+            "Terminal" => {
+                // Terminal.app: use System Events keystrokes as fallback
+                // Copy option number to clipboard for manual paste
+                let option_num = format!("{}", down_presses + 1);
+                let mut clipboard = arboard::Clipboard::new()?;
+                clipboard.set_text(&option_num)?;
+                jump_to_session(pid)?;
+                return Ok("clipboard_only".to_string());
+            }
+            _ => {
+                let option_num = format!("{}", down_presses + 1);
+                let mut clipboard = arboard::Clipboard::new()?;
+                clipboard.set_text(&option_num)?;
+                jump_to_session(pid)?;
+                return Ok("clipboard_only".to_string());
+            }
+        }
+    }
+
+    Ok("clipboard_only".to_string())
+}
+
+/// Multi-select: navigate through options, Space to toggle selected ones, Enter to confirm.
+/// `selected_indices` are 0-indexed positions that should be toggled on.
+pub fn select_multi_option(pid: u32, selected_indices: &[u32], _total_options: u32) -> Result<String, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-a", "-d", "0"])
+        .output()?;
+
+    let lsof_out = String::from_utf8_lossy(&output.stdout);
+    let tty = lsof_out
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts.last().map(|s| s.to_string())
+        })
+        .find(|s| s.starts_with("/dev/ttys"));
+
+    let terminal_app = detect_terminal_for_pid(pid);
+
+    if let Some(ref tty_path) = tty {
+        match terminal_app.as_str() {
+            "iTerm2" | "iTerm" => {
+                // Build key sequence: navigate down, press Space on selected items, then Enter
+                // Cursor starts at position 0
+                let selected_set: std::collections::HashSet<u32> = selected_indices.iter().cloned().collect();
+                let max_idx = selected_indices.iter().max().copied().unwrap_or(0);
+                let mut cmds = String::new();
+
+                for i in 0..=max_idx {
+                    if selected_set.contains(&i) {
+                        // Space to toggle this option (ASCII 32)
+                        cmds.push_str("tell s to write text \" \" without newline\n");
+                        cmds.push_str("delay 0.08\n");
+                    }
+                    if i < max_idx {
+                        // Down arrow to next
+                        cmds.push_str("tell s to write text (ASCII character 27) & \"[B\" without newline\n");
+                        cmds.push_str("delay 0.06\n");
+                    }
+                }
+
+                let script = format!(
+                    r#"tell application "iTerm2"
+                         repeat with w in windows
+                             repeat with t in tabs of w
+                                 repeat with s in sessions of t
+                                     if tty of s contains "{tty}" then
+                                         select t
+                                         set index of w to 1
+                                         {cmds}
+                                         delay 0.1
+                                         tell s to write text ""
+                                         return "sent"
+                                     end if
+                                 end repeat
+                             end repeat
+                         end repeat
+                     end tell"#,
+                    tty = tty_path,
+                    cmds = cmds,
+                );
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .output();
+                return Ok("auto_sent".to_string());
+            }
+            _ => {
+                let option_nums = selected_indices.iter().map(|i| format!("{}", i + 1)).collect::<Vec<_>>().join(",");
+                let mut clipboard = arboard::Clipboard::new()?;
+                clipboard.set_text(&option_nums)?;
+                jump_to_session(pid)?;
+                return Ok("clipboard_only".to_string());
+            }
+        }
+    }
+
+    Ok("clipboard_only".to_string())
 }
 
 /// Copy text to clipboard, jump to the terminal, and optionally paste+send

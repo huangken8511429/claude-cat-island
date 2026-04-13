@@ -3,9 +3,9 @@ mod approval;
 mod socket;
 
 use approval::{ApprovalDecision, ApprovalServer, PendingApproval};
-use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PermissionConfig, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
+use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PendingQuestion, PermissionConfig, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
 use tauri::PhysicalPosition;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 #[tauri::command]
 fn get_sessions() -> Result<Vec<ClaudeSession>, String> {
@@ -87,35 +87,148 @@ fn copy_and_jump(pid: u32, text: String) -> Result<String, String> {
     claude::copy_and_jump(pid, text).map_err(|e| e.to_string())
 }
 
-// ── Cursor position (for click-through detection) ──
+#[tauri::command]
+fn get_pending_questions() -> Result<Vec<PendingQuestion>, String> {
+    match claude::read_pending_questions() {
+        Ok(qs) => {
+            if !qs.is_empty() {
+                eprintln!("[questions] found {} pending question(s)", qs.len());
+                for q in &qs {
+                    eprintln!("[questions]   session={} q={} opts={}", q.session_id.chars().take(12).collect::<String>(), q.question.chars().take(30).collect::<String>(), q.options.len());
+                }
+            }
+            Ok(qs)
+        }
+        Err(e) => {
+            eprintln!("[questions] ERROR: {}", e);
+            Err(e.to_string())
+        }
+    }
+}
 
 #[tauri::command]
-fn get_cursor_position(window: tauri::WebviewWindow) -> Result<(f64, f64), String> {
-    // Get window position
-    let win_pos = window.outer_position().map_err(|e| e.to_string())?;
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+fn answer_question(pid: u32, answer: String) -> Result<String, String> {
+    claude::copy_and_jump(pid, answer).map_err(|e| e.to_string())
+}
 
-    // Get global cursor position via CGEvent
-    #[cfg(target_os = "macos")]
-    {
-        use core_graphics::event::CGEvent;
-        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+#[tauri::command]
+fn select_multi_option(pid: u32, selected_indices: Vec<u32>, total_options: u32) -> Result<String, String> {
+    eprintln!("[select_multi] pid={} indices={:?} total={}", pid, selected_indices, total_options);
+    claude::select_multi_option(pid, &selected_indices, total_options).map_err(|e| {
+        eprintln!("[select_multi] ERROR: {}", e);
+        e.to_string()
+    })
+}
 
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-            .map_err(|_| "Failed to create event source".to_string())?;
-        let event = CGEvent::new(source)
-            .map_err(|_| "Failed to create event".to_string())?;
-        let loc = event.location();
+#[tauri::command]
+fn select_question_option(pid: u32, down_presses: u32) -> Result<String, String> {
+    eprintln!("[select] select_question_option called: pid={} down_presses={}", pid, down_presses);
+    let result = claude::select_option(pid, down_presses).map_err(|e| {
+        eprintln!("[select] ERROR: {}", e);
+        e.to_string()
+    });
+    eprintln!("[select] result: {:?}", result);
+    result
+}
 
-        // Convert to window-local coordinates (in logical pixels)
-        // loc is in points (logical), win_pos is in physical pixels
-        let x = loc.x - win_pos.x as f64 / scale;
-        let y = loc.y - win_pos.y as f64 / scale;
-        return Ok((x, y));
+// ── Notch detection ──
+
+#[derive(serde::Serialize, Clone)]
+struct NotchInfo {
+    has_notch: bool,
+    notch_width: f64,
+    notch_height: f64,
+    pill_width: f64,
+}
+
+#[cfg(target_os = "macos")]
+fn detect_notch() -> NotchInfo {
+    use objc::{msg_send, sel, sel_impl, class};
+    use cocoa::foundation::NSRect;
+
+    unsafe {
+        let screens: cocoa::base::id = msg_send![class!(NSScreen), screens];
+        let main_screen: cocoa::base::id = msg_send![screens, objectAtIndex: 0usize];
+
+        // safeAreaInsets maps to NSEdgeInsets { top, left, bottom, right }
+        // via NSRect fields: origin.x=top, origin.y=left, size.width=bottom, size.height=right
+        let insets: cocoa::foundation::NSRect = msg_send![main_screen, safeAreaInsets];
+        let top_inset = insets.origin.x;
+
+        if top_inset > 0.0 {
+            let frame: NSRect = msg_send![main_screen, frame];
+            let aux_left: NSRect = msg_send![main_screen, auxiliaryTopLeftArea];
+            let aux_right: NSRect = msg_send![main_screen, auxiliaryTopRightArea];
+
+            // notch = the gap between the two auxiliary top areas
+            let notch_width = frame.size.width - aux_left.size.width - aux_right.size.width;
+            let notch_height = top_inset;
+            let pill_width = (notch_width + 120.0).max(350.0);
+
+            NotchInfo {
+                has_notch: true,
+                notch_width,
+                notch_height,
+                pill_width,
+            }
+        } else {
+            NotchInfo {
+                has_notch: false,
+                notch_width: 0.0,
+                notch_height: 0.0,
+                pill_width: 240.0,
+            }
+        }
     }
+}
 
-    #[cfg(not(target_os = "macos"))]
-    Err("Not supported on this platform".to_string())
+#[cfg(not(target_os = "macos"))]
+fn detect_notch() -> NotchInfo {
+    NotchInfo { has_notch: false, notch_width: 0.0, notch_height: 0.0, pill_width: 240.0 }
+}
+
+#[tauri::command]
+fn get_notch_info() -> NotchInfo {
+    detect_notch()
+}
+
+// ── Click-through state for fixed-window mode ──
+
+struct ClickThroughState {
+    /// Island bounds (x, y, w, h) in logical pixels relative to window
+    bounds: Mutex<(f64, f64, f64, f64)>,
+    cursor_inside: AtomicBool,
+}
+
+#[tauri::command]
+fn update_island_bounds(
+    state: tauri::State<'_, Arc<ClickThroughState>>,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) {
+    *state.bounds.lock().unwrap() = (x, y, w, h);
+}
+
+#[tauri::command]
+fn center_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    let notch = detect_notch();
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let screen = monitor.size();
+        let scale = monitor.scale_factor();
+        let logical_w = if notch.has_notch { notch.pill_width } else { 350.0 };
+        let logical_h = 500.0;
+        let phys_w = (logical_w * scale) as u32;
+        let phys_h = (logical_h * scale) as u32;
+        let x = ((screen.width as f64 - phys_w as f64) / 2.0) as i32;
+        let _ = window.set_size(tauri::Size::Physical(
+            tauri::PhysicalSize::new(phys_w, phys_h),
+        ));
+        window.set_position(tauri::Position::Physical(PhysicalPosition::new(x, 0)))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ── Approval commands ──
@@ -141,11 +254,15 @@ pub fn run() {
     let approval_server = Arc::new(ApprovalServer::new());
     approval_server.start();
 
-    let server_for_tauri = approval_server.clone();
+    let ct_state = Arc::new(ClickThroughState {
+        bounds: Mutex::new((55.0, 0.0, 240.0, 36.0)),
+        cursor_inside: AtomicBool::new(false),
+    });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(server_for_tauri)
+        .manage(approval_server.clone())
+        .manage(ct_state.clone())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
             get_session_transcript,
@@ -163,11 +280,17 @@ pub fn run() {
             get_session_pending_states,
             jump_to_session,
             copy_and_jump,
-            get_cursor_position,
             get_pending_approvals,
             resolve_approval,
+            get_pending_questions,
+            answer_question,
+            select_question_option,
+            select_multi_option,
+            get_notch_info,
+            update_island_bounds,
+            center_window,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::Manager;
             use tauri::tray::TrayIconBuilder;
 
@@ -207,32 +330,86 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ── Position window slightly left of center (clear the notch) ──
-            if let Some(window) = app.get_webview_window("main") {
-                if let Ok(Some(monitor)) = window.current_monitor() {
-                    let screen = monitor.size();
-                    let scale = monitor.scale_factor();
-                    let win_w = 240.0 * scale;
-                    let x = ((screen.width as f64 - win_w) / 2.0 - 20.0 * scale) as i32;
-                    let _ = window.set_position(tauri::Position::Physical(
-                        PhysicalPosition::new(x, 0),
-                    ));
-                }
+            // ── macOS adjustments first (these can shift the window) ──
+            let notch = detect_notch();
 
-                // Set window level above menu bar
+            if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
                 {
                     use cocoa::appkit::NSWindow;
                     let ns_win: cocoa::base::id = window.ns_window().unwrap() as cocoa::base::id;
                     unsafe {
-                        ns_win.setLevel_(25); // NSStatusWindowLevel
+                        ns_win.setLevel_(25);
                     }
                 }
             }
 
-            // ── Hide from Dock ──
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // ── Fixed-size transparent window (positioned AFTER macOS adjustments) ──
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let screen = monitor.size();
+                    let scale = monitor.scale_factor();
+                    let logical_w = if notch.has_notch { notch.pill_width } else { 350.0 };
+                    let logical_h = 500.0;
+                    let phys_w = (logical_w * scale) as u32;
+                    let phys_h = (logical_h * scale) as u32;
+
+                    let x = ((screen.width as f64 - phys_w as f64) / 2.0) as i32;
+                    let _ = window.set_size(tauri::Size::Physical(
+                        tauri::PhysicalSize::new(phys_w, phys_h),
+                    ));
+                    let _ = window.set_position(tauri::Position::Physical(
+                        PhysicalPosition::new(x, 0),
+                    ));
+                }
+
+                // Start fully click-through; cursor tracking thread toggles this
+                let _ = window.set_ignore_cursor_events(true);
+
+                // ── Cursor tracking thread: toggle click-through based on island bounds ──
+                #[cfg(target_os = "macos")]
+                {
+                    let win = window.clone();
+                    let cts = ct_state;
+                    std::thread::spawn(move || {
+                        use core_graphics::event::CGEvent;
+                        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+
+                            let loc = match CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+                                .ok()
+                                .and_then(|src| CGEvent::new(src).ok())
+                            {
+                                Some(evt) => evt.location(),
+                                None => continue,
+                            };
+
+                            let (local_x, local_y) = match (win.outer_position(), win.scale_factor()) {
+                                (Ok(pos), Ok(scale)) => (
+                                    loc.x - pos.x as f64 / scale,
+                                    loc.y - pos.y as f64 / scale,
+                                ),
+                                _ => continue,
+                            };
+
+                            let (bx, by, bw, bh) = *cts.bounds.lock().unwrap();
+                            let inside = local_x >= bx && local_x <= bx + bw
+                                      && local_y >= by && local_y <= by + bh;
+
+                            let was = cts.cursor_inside.load(Ordering::Relaxed);
+                            if inside != was {
+                                cts.cursor_inside.store(inside, Ordering::Relaxed);
+                                let _ = win.set_ignore_cursor_events(!inside);
+                            }
+                        }
+                    });
+                }
+            }
 
             // ── Start Unix socket server for hook events ──
             socket::start(app.handle().clone());
