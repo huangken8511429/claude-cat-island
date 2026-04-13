@@ -28,13 +28,22 @@ Events are pushed in real time via Unix socket. The app also maintains file-base
 
 ## Install
 
+### Homebrew (recommended)
+
+```bash
+brew tap huangken8511429/claude-cat-monitor
+brew install --cask claude-cat-monitor
+```
+
 ### One-line install (Apple Silicon)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huangken8511429/claude-cat-island/main/install.sh | bash
 ```
 
-Or grab the `.zip` / `.dmg` from [Releases](https://github.com/huangken8511429/claude-cat-island/releases) manually.
+### Manual download
+
+Grab the `.zip` or `.dmg` from [Releases](https://github.com/huangken8511429/claude-cat-island/releases).
 
 ### Build from source
 
