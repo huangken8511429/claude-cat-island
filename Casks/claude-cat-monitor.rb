@@ -1,5 +1,5 @@
 cask "claude-cat-monitor" do
-  version "0.2.0"
+  version "0.2.1"
   sha256 :no_check # Updated automatically by CI
 
   url "https://github.com/huangken8511429/claude-cat-island/releases/download/v#{version}/Claude.Cat.Monitor_#{version}_aarch64.zip"
