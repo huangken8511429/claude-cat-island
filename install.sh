@@ -47,8 +47,9 @@ ok "Download complete."
 
 # ── Mount & Install ──
 info "Mounting disk image..."
-MOUNT_POINT=$(hdiutil attach "$DMG_PATH" -nobrowse -quiet | tail -1 | awk -F'\t' '{print $NF}')
-[[ -d "$MOUNT_POINT" ]] || fail "Failed to mount DMG."
+MOUNT_OUTPUT=$(hdiutil attach "$DMG_PATH" -nobrowse 2>&1) || fail "hdiutil attach failed:\n${MOUNT_OUTPUT}"
+MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep '/Volumes/' | sed 's/.*\(\/Volumes\/.*\)/\1/' | head -1 | xargs)
+[[ -d "$MOUNT_POINT" ]] || fail "Failed to find mount point. hdiutil output:\n${MOUNT_OUTPUT}"
 
 SRC_APP="${MOUNT_POINT}/${APP_NAME}.app"
 [[ -d "$SRC_APP" ]] || fail "App not found in DMG at: ${SRC_APP}"
