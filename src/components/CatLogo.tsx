@@ -28,44 +28,72 @@ const FACE_IDLE: number[][] = [
   [_,_,O,O,O,O,O,O,O,O,_,_],
 ];
 
-// ── Working face (alert, focused eyes) ──
-const FACE_WORKING: number[][] = [
+// ── Working face: looking down at keyboard, left paw tap ──
+const FACE_WORK_TAP_L: number[][] = [
   [_,O,O,_,_,_,_,_,_,O,O,_],
   [O,E,B,O,_,_,_,_,O,B,E,O],
   [O,B,B,B,O,O,O,O,B,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,Y,H,B,B,B,B,Y,H,B,O],
-  [O,B,Y,B,B,B,B,B,Y,B,B,O],
+  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [O,B,Y,H,B,B,B,B,Y,H,B,O],  // eyes lower (looking down)
   [O,B,B,K,B,N,N,B,K,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
-  [_,O,B,B,B,B,B,B,B,B,O,_],
+  [_,O,B,K,K,B,B,B,B,B,O,_],  // left paw tap
   [_,_,O,O,O,O,O,O,O,O,_,_],
 ];
 
-// ── Working face alt (blink) ──
+// ── Working face: looking down at keyboard, right paw tap ──
+const FACE_WORK_TAP_R: number[][] = [
+  [_,O,O,_,_,_,_,_,_,O,O,_],
+  [O,E,B,O,_,_,_,_,O,B,E,O],
+  [O,B,B,B,O,O,O,O,B,B,B,O],
+  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [O,B,Y,H,B,B,B,B,Y,H,B,O],  // eyes lower (looking down)
+  [O,B,B,K,B,N,N,B,K,B,B,O],
+  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [_,O,B,B,B,B,B,K,K,B,O,_],  // right paw tap
+  [_,_,O,O,O,O,O,O,O,O,_,_],
+];
+
+// ── Working face: both paws resting ──
+const FACE_WORK_REST: number[][] = [
+  [_,O,O,_,_,_,_,_,_,O,O,_],
+  [O,E,B,O,_,_,_,_,O,B,E,O],
+  [O,B,B,B,O,O,O,O,B,B,B,O],
+  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [O,B,Y,H,B,B,B,B,Y,H,B,O],  // eyes lower
+  [O,B,B,K,B,N,N,B,K,B,B,O],
+  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [_,O,B,K,B,B,B,B,K,B,O,_],  // both paws resting
+  [_,_,O,O,O,O,O,O,O,O,_,_],
+];
+
+// ── Working face: blink while typing ──
 const FACE_WORKING_BLINK: number[][] = [
   [_,O,O,_,_,_,_,_,_,O,O,_],
   [O,E,B,O,_,_,_,_,O,B,E,O],
   [O,B,B,B,O,O,O,O,B,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,Y,Y,B,B,B,B,Y,Y,B,O],
+  [O,B,Y,Y,B,B,B,B,Y,Y,B,O],  // blink
   [O,B,B,K,B,N,N,B,K,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
-  [_,O,B,B,B,B,B,B,B,B,O,_],
+  [_,O,B,K,K,B,B,B,B,B,O,_],  // left paw mid-tap
   [_,_,O,O,O,O,O,O,O,O,_,_],
 ];
 
-// ── Sleeping face (closed eyes) ──
+// ── Sleeping face (curved closed eyes −‿−, peaceful mouth) ──
 const FACE_SLEEPING: number[][] = [
   [_,O,O,_,_,_,_,_,_,O,O,_],
   [O,E,B,O,_,_,_,_,O,B,E,O],
   [O,B,B,B,O,O,O,O,B,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,Y,Y,B,B,B,B,Y,Y,B,O],
+  [O,B,Y,B,Y,B,B,Y,B,Y,B,O],  // curved closed eyes ‿ shape
+  [O,B,B,Y,B,B,B,B,Y,B,B,O],  // bottom of curve
   [O,B,B,K,B,N,N,B,K,B,B,O],
-  [O,B,B,B,B,B,B,B,B,B,B,O],
+  [O,B,B,B,M,B,B,M,B,B,B,O],  // small peaceful smile
   [_,O,B,B,B,B,B,B,B,B,O,_],
   [_,_,O,O,O,O,O,O,O,O,_,_],
 ];
@@ -144,10 +172,10 @@ const FACE_ANXIOUS_L: number[][] = [
   [O,E,B,O,_,_,_,_,O,B,E,O],
   [O,B,B,B,O,O,O,O,B,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,Y,H,B,B,B,B,Y,H,B,B,O],  // eyes looking left
-  [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,B,K,B,N,N,B,K,B,B,O],
-  [O,B,B,B,M,M,M,B,B,B,B,O],  // worried wavy mouth
+  [O,Y,Y,H,B,B,B,Y,Y,H,B,O],  // bigger eyes looking left
+  [O,B,B,B,B,B,B,B,B,B,H,O],  // sweat drop right side
+  [O,B,B,B,B,N,N,B,B,B,H,O],  // sweat continues
+  [O,B,B,M,M,M,M,M,B,B,B,O],  // wider worried wavy mouth
   [_,O,B,B,B,B,B,B,B,B,O,_],
   [_,_,O,O,O,O,O,O,O,O,_,_],
 ];
@@ -157,10 +185,10 @@ const FACE_ANXIOUS_R: number[][] = [
   [O,E,B,O,_,_,_,_,O,B,E,O],
   [O,B,B,B,O,O,O,O,B,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,B,Y,H,B,B,B,B,Y,H,O],  // eyes looking right
-  [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,B,K,B,N,N,B,K,B,B,O],
-  [O,B,B,B,B,M,M,M,B,B,B,O],  // worried mouth other side
+  [O,B,H,Y,Y,B,B,B,H,Y,Y,O],  // bigger eyes looking right
+  [O,H,B,B,B,B,B,B,B,B,B,O],  // sweat drop left side
+  [O,H,B,B,B,N,N,B,B,B,B,O],  // sweat continues
+  [O,B,B,B,M,M,M,M,M,B,B,O],  // wider worried mouth
   [_,O,B,B,B,B,B,B,B,B,O,_],
   [_,_,O,O,O,O,O,O,O,O,_,_],
 ];
@@ -169,11 +197,11 @@ const FACE_ANXIOUS_SWEAT: number[][] = [
   [_,O,O,_,_,_,_,_,_,O,O,_],
   [O,E,B,O,_,_,_,_,O,B,E,O],
   [O,B,B,B,O,O,O,O,B,B,B,O],
-  [O,B,B,B,B,B,B,B,B,B,B,O],
-  [O,B,Y,H,B,B,B,B,Y,H,B,O],  // normal eyes
-  [O,B,B,B,B,B,B,B,B,B,H,O],  // sweat drop (H=white)
-  [O,B,B,K,B,N,N,B,K,B,B,O],
-  [O,B,B,B,M,M,M,B,B,B,B,O],  // worried mouth
+  [O,B,B,B,B,B,B,B,B,B,H,O],  // sweat starts high
+  [O,B,Y,Y,H,B,B,Y,Y,H,B,O],  // big eyes centered
+  [O,B,B,B,B,B,B,B,B,B,H,O],  // sweat drop right (2px tall)
+  [O,B,B,B,B,N,N,B,B,B,H,O],  // sweat continues down
+  [O,B,B,M,M,M,M,M,B,B,B,O],  // wide worried mouth
   [_,O,B,B,B,B,B,B,B,B,O,_],
   [_,_,O,O,O,O,O,O,O,O,_,_],
 ];
@@ -183,8 +211,8 @@ const FACE_SWEAT_A: number[][] = [
   [_,O,O,_,_,_,_,_,_,O,O,_],
   [O,E,B,O,_,_,_,_,O,B,E,O],
   [O,B,B,B,O,O,O,O,B,B,B,O],
-  [O,B,B,B,B,B,B,B,B,B,H,O],  // sweat drop high
-  [O,B,Y,H,B,B,B,B,Y,H,B,O],
+  [O,H,B,B,B,B,B,B,B,B,H,O],  // sweat drops both sides high
+  [O,H,Y,H,B,B,B,B,Y,H,H,O],  // sweat flanking eyes
   [O,B,B,B,B,B,B,B,B,B,B,O],
   [O,B,B,K,B,N,N,B,K,B,B,O],
   [O,B,B,M,M,B,B,M,M,B,B,O],  // wavy worried mouth ~~
@@ -198,8 +226,8 @@ const FACE_SWEAT_B: number[][] = [
   [O,B,B,B,O,O,O,O,B,B,B,O],
   [O,B,B,B,B,B,B,B,B,B,B,O],
   [O,B,Y,H,B,B,B,B,Y,H,B,O],
-  [O,B,B,B,B,B,B,B,B,B,H,O],  // sweat drop lower
-  [O,B,B,K,B,N,N,B,K,B,H,O],  // sweat continues
+  [O,H,B,B,B,B,B,B,B,B,H,O],  // sweat drops lower both sides
+  [O,H,B,K,B,N,N,B,K,B,H,O],  // sweat continues
   [O,B,B,M,M,B,B,M,M,B,B,O],
   [_,O,B,B,B,B,B,B,B,B,O,_],
   [_,_,O,O,O,O,O,O,O,O,_,_],
@@ -236,11 +264,49 @@ const THEMES: LogoTheme[] = [
   { body: "#c49a6c", earInner: "#ffb6c1", eye: "#2a5010", nose: "#ff8fab", highlight: "#fff", mouth: "#5a3a10", outline: "#5a3a10", cheek: "#e0a090" },
 ];
 
-function getColor(zone: number, t: LogoTheme): string | null {
+// State-specific color overrides for better visual distinction
+const STATE_OVERRIDES: Partial<Record<string, Partial<Record<number, string>>>> = {
+  working: {
+    // no color override — uses eye-scanning animation instead
+  },
+  sleeping: {
+    [B]: undefined,  // handled via tint below
+    [Y]: "#6a6a7a",  // muted gray-purple closed eyes
+  },
+  scared: {
+    [Y]: "#ff3333",  // red wide eyes
+    [M]: "#ff3333",  // red mouth
+  },
+  anxious: {
+    [H]: "#44ccff",  // bright cyan sweat drops
+  },
+  sweating: {
+    [H]: "#44ccff",  // bright cyan sweat drops
+  },
+  done: {
+    [Y]: "#ffcc00",  // golden happy eyes
+    [K]: "#ffaacc",  // rosy cheeks
+  },
+};
+
+function getColor(zone: number, t: LogoTheme, state?: string): string | null {
+  if (zone === 0) return null;
+
+  // Check for state-specific override
+  const overrides = state ? STATE_OVERRIDES[state] : undefined;
+  if (overrides && zone in overrides) {
+    return overrides[zone] ?? null;
+  }
+
   switch (zone) {
-    case 0: return null;
     case O: return t.outline;
-    case B: return t.body;
+    case B: {
+      // Sleeping: darken/desaturate body
+      if (state === "sleeping") return darken(t.body, 0.25);
+      // Scared: reddish tint
+      if (state === "scared") return tint(t.body, "#ff4444", 0.2);
+      return t.body;
+    }
     case E: return t.earInner;
     case Y: return t.eye;
     case N: return t.nose;
@@ -251,13 +317,33 @@ function getColor(zone: number, t: LogoTheme): string | null {
   }
 }
 
+// Simple color utilities for state tinting
+function darken(hex: string, amount: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const f = 1 - amount;
+  return `#${Math.round(r * f).toString(16).padStart(2, "0")}${Math.round(g * f).toString(16).padStart(2, "0")}${Math.round(b * f).toString(16).padStart(2, "0")}`;
+}
+
+function tint(hex: string, tintHex: string, amount: number): string {
+  const r1 = parseInt(hex.slice(1, 3), 16);
+  const g1 = parseInt(hex.slice(3, 5), 16);
+  const b1 = parseInt(hex.slice(5, 7), 16);
+  const r2 = parseInt(tintHex.slice(1, 3), 16);
+  const g2 = parseInt(tintHex.slice(3, 5), 16);
+  const b2 = parseInt(tintHex.slice(5, 7), 16);
+  const f = 1 - amount;
+  return `#${Math.round(r1 * f + r2 * amount).toString(16).padStart(2, "0")}${Math.round(g1 * f + g2 * amount).toString(16).padStart(2, "0")}${Math.round(b1 * f + b2 * amount).toString(16).padStart(2, "0")}`;
+}
+
 const GRID_W = 12;
 const GRID_H = 10;
 
 // Animation config per state
 const ANIM: Record<string, { frames: number[][][]; speed: number }> = {
   idle: { frames: [FACE_IDLE, FACE_IDLE, FACE_IDLE, FACE_IDLE, FACE_IDLE, FACE_WORKING_BLINK], speed: 30 },
-  working: { frames: [FACE_WORKING, FACE_WORKING, FACE_WORKING, FACE_WORKING_BLINK], speed: 20 },
+  working: { frames: [FACE_WORK_TAP_L, FACE_WORK_TAP_R, FACE_WORK_TAP_L, FACE_WORK_TAP_R, FACE_WORK_REST, FACE_WORK_TAP_L, FACE_WORK_TAP_R, FACE_WORKING_BLINK], speed: 8 },
   sleeping: { frames: [FACE_SLEEPING], speed: 60 },
   done: { frames: [FACE_DONE], speed: 60 },
   // Emotion states with dedicated pixel art
@@ -266,6 +352,19 @@ const ANIM: Record<string, { frames: number[][][]; speed: number }> = {
   anxious: { frames: [FACE_ANXIOUS_L, FACE_ANXIOUS_L, FACE_ANXIOUS_R, FACE_ANXIOUS_R, FACE_ANXIOUS_SWEAT, FACE_ANXIOUS_SWEAT], speed: 10 }, // darting eyes + sweat
   sweating: { frames: [FACE_SWEAT_A, FACE_SWEAT_A, FACE_SWEAT_B, FACE_SWEAT_B], speed: 15 }, // dripping sweat
 };
+
+function getStateIndicator(state: string, _size: number): string | null {
+  switch (state) {
+    case "working": return "_";
+    case "sleeping": return "z";
+    case "done": return "\u2713";     // ✓
+    case "scared": return "!";
+    case "anxious": return "?";
+    case "sweating": return "!";
+    case "yawning": return "z";
+    default: return null;
+  }
+}
 
 export default function CatLogo({ state = "idle", size = 16, themeIndex = 0, className }: CatLogoProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -303,7 +402,7 @@ export default function CatLogo({ state = "idle", size = 16, themeIndex = 0, cla
       for (let row = 0; row < GRID_H; row++) {
         for (let col = 0; col < GRID_W; col++) {
           const zone = sprite[row]?.[col] ?? 0;
-          const color = getColor(zone, theme);
+          const color = getColor(zone, theme, state);
           if (color) {
             ctx.fillStyle = color;
             ctx.fillRect(col * px, row * px, px, px);
@@ -320,19 +419,28 @@ export default function CatLogo({ state = "idle", size = 16, themeIndex = 0, cla
     return () => cancelAnimationFrame(rafId);
   }, [state, theme, px, canvasW, canvasH, prefersReducedMotion]);
 
+  const indicator = getStateIndicator(state, size);
+
   return (
-    <canvas
-      ref={canvasRef}
-      width={canvasW}
-      height={canvasH}
-      className={`pixel-cat-canvas ${className || ""}`}
-      style={{
-        imageRendering: "pixelated",
-        width: size,
-        height: Math.round(size * (GRID_H / GRID_W)),
-        flexShrink: 0,
-      }}
-    />
+    <span className={`cat-logo-wrap ${state === "working" ? "cat-logo--working" : ""} ${className || ""}`} style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
+      <canvas
+        ref={canvasRef}
+        width={canvasW}
+        height={canvasH}
+        className="pixel-cat-canvas"
+        style={{
+          imageRendering: "pixelated",
+          width: size,
+          height: Math.round(size * (GRID_H / GRID_W)),
+          flexShrink: 0,
+        }}
+      />
+      {indicator && !prefersReducedMotion && (
+        <span className={`cat-indicator cat-indicator--${state}`} style={{ fontSize: Math.max(7, Math.round(size * 0.4)) }}>
+          {indicator}
+        </span>
+      )}
+    </span>
   );
 }
 

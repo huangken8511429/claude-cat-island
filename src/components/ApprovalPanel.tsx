@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import Lottie from "lottie-react";
+import blackCatAnimation from "../assets/animated-black-cat.json";
 import CatLogo from "./CatLogo";
 
 interface PendingApproval {
@@ -94,7 +96,11 @@ export default function ApprovalPanel() {
       <div className="panel approval-panel">
         <h2 className="panel-title">APPROVALS</h2>
         <div className="empty-state">
-          <CatLogo state="sleeping" size={24} />
+          <Lottie
+            animationData={blackCatAnimation}
+            loop={true}
+            style={{ width: 120, height: 120 }}
+          />
           <p>No pending approvals</p>
         </div>
       </div>
