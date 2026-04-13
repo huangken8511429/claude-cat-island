@@ -24,35 +24,34 @@ ARCH="$(uname -m)"
 [[ "$ARCH" == "arm64" ]] || fail "This build requires Apple Silicon (arm64). Got: $ARCH"
 
 command -v curl >/dev/null || fail "curl is required but not found."
+command -v unzip >/dev/null || fail "unzip is required but not found."
 
 # ── Fetch latest release ──
 info "Fetching latest release from GitHub..."
 RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
 TAG=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*: "//;s/".*//')
-DMG_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep '\.dmg"' | head -1 | sed 's/.*: "//;s/".*//')
+ZIP_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep '\.zip"' | head -1 | sed 's/.*: "//;s/".*//')
 
 [[ -n "$TAG" ]]     || fail "Could not determine latest release tag."
-[[ -n "$DMG_URL" ]] || fail "Could not find .dmg asset in release ${TAG}."
+[[ -n "$ZIP_URL" ]] || fail "Could not find .zip asset in release ${TAG}."
 
 info "Latest version: ${TAG}"
 
 # ── Download ──
 TMPDIR_PATH=$(mktemp -d)
-DMG_PATH="${TMPDIR_PATH}/${APP_NAME}.dmg"
+ZIP_PATH="${TMPDIR_PATH}/${APP_NAME}.zip"
 trap 'rm -rf "$TMPDIR_PATH"' EXIT
 
-info "Downloading ${DMG_URL##*/}..."
-curl -fSL --progress-bar -o "$DMG_PATH" "$DMG_URL"
+info "Downloading ${ZIP_URL##*/}..."
+curl -fSL --progress-bar -o "$ZIP_PATH" "$ZIP_URL"
 ok "Download complete."
 
-# ── Mount & Install ──
-info "Mounting disk image..."
-MOUNT_OUTPUT=$(hdiutil attach "$DMG_PATH" -nobrowse 2>&1) || fail "hdiutil attach failed:\n${MOUNT_OUTPUT}"
-MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep '/Volumes/' | sed 's/.*\(\/Volumes\/.*\)/\1/' | head -1 | xargs)
-[[ -d "$MOUNT_POINT" ]] || fail "Failed to find mount point. hdiutil output:\n${MOUNT_OUTPUT}"
+# ── Unzip & Install ──
+info "Extracting..."
+unzip -q "$ZIP_PATH" -d "$TMPDIR_PATH"
 
-SRC_APP="${MOUNT_POINT}/${APP_NAME}.app"
-[[ -d "$SRC_APP" ]] || fail "App not found in DMG at: ${SRC_APP}"
+SRC_APP="${TMPDIR_PATH}/${APP_NAME}.app"
+[[ -d "$SRC_APP" ]] || fail "App not found after extraction."
 
 DEST_APP="${INSTALL_DIR}/${APP_NAME}.app"
 if [[ -d "$DEST_APP" ]]; then
@@ -68,9 +67,6 @@ ok "Installed ${APP_NAME}.app"
 info "Removing macOS quarantine attribute..."
 xattr -cr "$DEST_APP"
 ok "Quarantine cleared."
-
-# ── Unmount ──
-hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
 
 # ── Done ──
 echo ""
