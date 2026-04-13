@@ -28,11 +28,13 @@ Events are pushed in real time via Unix socket. The app also maintains file-base
 
 ## Install
 
-### Download (Apple Silicon)
+### One-line install (Apple Silicon)
 
-Grab the `.dmg` from [Releases](https://github.com/huangken8511429/claude-cat-island/releases) and drag to `/Applications`.
+```bash
+curl -fsSL https://raw.githubusercontent.com/huangken8511429/claude-cat-island/main/install.sh | bash
+```
 
-First launch: right-click the app -> Open (bypasses Gatekeeper since it's unsigned).
+Or grab the `.zip` / `.dmg` from [Releases](https://github.com/huangken8511429/claude-cat-island/releases) manually.
 
 ### Build from source
 
@@ -41,9 +43,8 @@ git clone https://github.com/huangken8511429/claude-cat-island.git
 cd claude-cat-island
 npm install
 npx tauri build
+cp -rf "src-tauri/target/release/bundle/macos/Claude Cat Monitor.app" /Applications/
 ```
-
-Output: `src-tauri/target/release/bundle/macos/Claude Cat Monitor.app`
 
 ### Prerequisites
 
