@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 // Window API no longer needed — window is fixed-size, Rust handles click-through
-import { CatState, ClaudeSession, TokenStats, SkillInfo, PermissionConfig, LiveStats, SessionPendingState, PendingApproval, PendingQuestion, SessionActivityInfo } from "./types";
+import { CatState, ClaudeSession, TokenStats, SkillInfo, PermissionConfig, LiveStats, SessionPendingState, PendingApproval, PendingQuestion, SessionActivityInfo, Prerequisites } from "./types";
 import SessionPanel from "./components/SessionPanel";
 import TokenPanel from "./components/TokenPanel";
 import SkillPanel from "./components/SkillPanel";
@@ -70,6 +70,7 @@ function App() {
   const [, setAudioReady] = useState(false);
   const [lastNotifText, setLastNotifText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [prereqs, setPrereqs] = useState<Prerequisites | null>(null);
   const [toolStatuses, setToolStatuses] = useState<Record<string, ToolStatus>>({});
   const [notchInfo, setNotchInfo] = useState<{ has_notch: boolean; notch_width: number; notch_height: number; pill_width: number } | null>(null);
 
@@ -89,6 +90,13 @@ function App() {
     invoke<{ has_notch: boolean; notch_width: number; notch_height: number; pill_width: number }>("get_notch_info")
       .then(setNotchInfo)
       .catch(() => setNotchInfo({ has_notch: false, notch_width: 0, notch_height: 0, pill_width: 240 }));
+  }, []);
+
+  // Check prerequisites on mount
+  useEffect(() => {
+    invoke<Prerequisites>("check_prerequisites")
+      .then(setPrereqs)
+      .catch(() => setPrereqs({ claudeInstalled: false, claudeDir: "", hasSettings: false, hasSessions: false }));
   }, []);
   const lastAutoNotifyBySession = useRef<Map<string, number>>(new Map());
   const approvalFirstSeen = useRef<Map<string, number>>(new Map());
@@ -551,7 +559,23 @@ function App() {
                 ))}
               </nav>
             )}
-            {error && (
+            {prereqs && !prereqs.claudeInstalled && (
+              <div className="setup-guide" role="alert">
+                <div className="setup-icon">?</div>
+                <div className="setup-title">Claude Code not found</div>
+                <div className="setup-text">
+                  Install Claude Code first, then relaunch this app.
+                </div>
+                <a className="setup-link" href="https://docs.anthropic.com/en/docs/claude-code/overview" target="_blank" rel="noreferrer">
+                  Install Guide &gt;
+                </a>
+                <button className="retry-btn" onClick={() => {
+                  invoke<Prerequisites>("check_prerequisites").then(setPrereqs);
+                  refresh();
+                }}>RETRY</button>
+              </div>
+            )}
+            {error && prereqs?.claudeInstalled && (
               <div className="error-banner" role="alert">
                 <span>! {error}</span>
                 <button onClick={refresh}>RETRY</button>

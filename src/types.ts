@@ -1,3 +1,10 @@
+export interface Prerequisites {
+  claudeInstalled: boolean;
+  claudeDir: string;
+  hasSettings: boolean;
+  hasSessions: boolean;
+}
+
 export interface ClaudeSession {
   pid: number;
   sessionId: string;

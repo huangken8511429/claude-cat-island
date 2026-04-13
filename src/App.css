@@ -2018,6 +2018,62 @@ body {
   color: var(--text-primary);
 }
 
+/* ── Setup Guide (Claude Code not found) ── */
+.setup-guide {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 20px 16px;
+  margin: 12px;
+  background: rgba(251, 191, 36, 0.06);
+  border: 1px solid rgba(251, 191, 36, 0.15);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+.setup-icon {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  color: #fbbf24;
+  line-height: 1;
+}
+.setup-title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: #fbbf24;
+}
+.setup-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.setup-link {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+}
+.setup-link:hover {
+  text-decoration: underline;
+}
+.retry-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  cursor: pointer;
+  margin-top: 4px;
+}
+.retry-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+}
+
 /* ── Loading Skeleton ── */
 .skeleton {
   background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-elevated) 50%, var(--bg-surface) 75%);

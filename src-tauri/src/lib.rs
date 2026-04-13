@@ -3,9 +3,14 @@ mod approval;
 mod socket;
 
 use approval::{ApprovalDecision, ApprovalServer, PendingApproval};
-use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PendingQuestion, PermissionConfig, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
+use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PendingQuestion, PermissionConfig, Prerequisites, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
 use tauri::PhysicalPosition;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+
+#[tauri::command]
+fn check_prerequisites() -> Prerequisites {
+    claude::check_prerequisites()
+}
 
 #[tauri::command]
 fn get_sessions() -> Result<Vec<ClaudeSession>, String> {
@@ -264,6 +269,7 @@ pub fn run() {
         .manage(approval_server.clone())
         .manage(ct_state.clone())
         .invoke_handler(tauri::generate_handler![
+            check_prerequisites,
             get_sessions,
             get_session_transcript,
             get_session_last_message,

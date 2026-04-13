@@ -12,6 +12,37 @@ fn monitor_dir() -> PathBuf {
     PathBuf::from(home).join(".claude-cat-monitor")
 }
 
+// ── Prerequisites Check ──
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Prerequisites {
+    #[serde(rename = "claudeInstalled")]
+    pub claude_installed: bool,
+    #[serde(rename = "claudeDir")]
+    pub claude_dir: String,
+    #[serde(rename = "hasSettings")]
+    pub has_settings: bool,
+    #[serde(rename = "hasSessions")]
+    pub has_sessions: bool,
+}
+
+pub fn check_prerequisites() -> Prerequisites {
+    let cd = claude_dir();
+    let claude_installed = cd.exists();
+    let has_settings = cd.join("settings.json").exists();
+    let has_sessions = cd.join("sessions").exists()
+        && fs::read_dir(cd.join("sessions"))
+            .map(|entries| entries.count() > 0)
+            .unwrap_or(false);
+
+    Prerequisites {
+        claude_installed,
+        claude_dir: cd.to_string_lossy().to_string(),
+        has_settings,
+        has_sessions,
+    }
+}
+
 /// Collect session IDs of all currently-alive sessions (quick, reads small JSON files).
 fn alive_session_ids() -> std::collections::HashSet<String> {
     let mut ids = std::collections::HashSet::new();
@@ -376,7 +407,7 @@ fn derive_activity_from_content(content: &str) -> (String, Option<String>) {
 
 // ── Token Stats ──
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct DailyActivity {
     pub date: String,
     #[serde(rename = "messageCount")]
@@ -387,17 +418,21 @@ pub struct DailyActivity {
     pub tool_call_count: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TokenStats {
+    #[serde(default)]
     pub version: u32,
-    #[serde(rename = "lastComputedDate")]
+    #[serde(default, rename = "lastComputedDate")]
     pub last_computed_date: String,
-    #[serde(rename = "dailyActivity")]
+    #[serde(default, rename = "dailyActivity")]
     pub daily_activity: Vec<DailyActivity>,
 }
 
 pub fn read_token_stats() -> Result<TokenStats, Box<dyn std::error::Error>> {
     let stats_path = claude_dir().join("stats-cache.json");
+    if !stats_path.exists() {
+        return Ok(TokenStats::default());
+    }
     let content = fs::read_to_string(&stats_path)?;
     let stats: TokenStats = serde_json::from_str(&content)?;
     Ok(stats)
@@ -845,7 +880,7 @@ fn read_skill_description(skill_dir: &PathBuf) -> Option<String> {
 
 // ── Permissions ──
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PermissionConfig {
     #[serde(rename = "skipDangerousMode")]
     pub skip_dangerous_mode: bool,
@@ -857,6 +892,9 @@ pub struct PermissionConfig {
 
 pub fn read_permissions() -> Result<PermissionConfig, Box<dyn std::error::Error>> {
     let settings_path = claude_dir().join("settings.json");
+    if !settings_path.exists() {
+        return Ok(PermissionConfig::default());
+    }
     let content = fs::read_to_string(&settings_path)?;
     let settings: serde_json::Value = serde_json::from_str(&content)?;
 

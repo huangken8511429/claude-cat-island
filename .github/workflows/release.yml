@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npx tauri build --target aarch64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
+
+      - name: Create zip artifact
+        run: |
+          cd src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          zip -r "Claude.Cat.Monitor_${{ github.ref_name }}_aarch64.zip" "Claude Cat Monitor.app"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Claude.Cat.Monitor_${{ github.ref_name }}_aarch64.zip
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          generate_release_notes: true
+
+      - name: Compute SHA256 for Homebrew
+        run: |
+          cd src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          shasum -a 256 "Claude.Cat.Monitor_${{ github.ref_name }}_aarch64.zip"
