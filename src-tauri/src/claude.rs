@@ -1077,6 +1077,7 @@ pub struct PendingQuestion {
 pub fn read_pending_questions() -> Result<Vec<PendingQuestion>, Box<dyn std::error::Error>> {
     let sessions = read_sessions()?;
     let mut questions = Vec::new();
+    let mut seen_tool_use_ids = std::collections::HashSet::new();
 
     for session in &sessions {
         if !session.is_alive {
@@ -1084,7 +1085,11 @@ pub fn read_pending_questions() -> Result<Vec<PendingQuestion>, Box<dyn std::err
         }
 
         if let Some(q) = detect_ask_user_question(&session.session_id, &session.cwd, session.pid)? {
-            questions.push(q);
+            // Dedup across sessions: the same AskUserQuestion can appear in
+            // multiple transcripts when sessions are resumed or forked.
+            if seen_tool_use_ids.insert(q.tool_use_id.clone()) {
+                questions.push(q);
+            }
         }
     }
 
@@ -1322,6 +1327,37 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
 /// Send arrow-key navigation to select an option in an interactive prompt.
 /// Uses terminal-specific AppleScript to write escape sequences to the process input.
 /// `down_presses`: number of down-arrow key presses before Enter.
+/// Set the macOS system clipboard using pbcopy.
+/// More reliable than arboard for short-lived write-only scenarios.
+fn set_clipboard_pbcopy(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
+/// Activate VSCode and send Cmd+V + Return via System Events.
+/// Requires Accessibility permission granted to Claude Cat Monitor.
+/// Assumes the active terminal pane already holds keyboard focus (which is
+/// normally true because Claude was just reading input there).
+fn vscode_paste_and_enter() {
+    let script = r#"tell application "Visual Studio Code" to activate
+delay 0.15
+tell application "System Events"
+    keystroke "v" using command down
+    delay 0.08
+    key code 36
+end tell"#;
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output();
+}
+
 pub fn select_option(pid: u32, down_presses: u32) -> Result<String, Box<dyn std::error::Error>> {
     let output = std::process::Command::new("lsof")
         .args(["-p", &pid.to_string(), "-a", "-d", "0"])
@@ -1382,15 +1418,22 @@ pub fn select_option(pid: u32, down_presses: u32) -> Result<String, Box<dyn std:
                 // Terminal.app: use System Events keystrokes as fallback
                 // Copy option number to clipboard for manual paste
                 let option_num = format!("{}", down_presses + 1);
-                let mut clipboard = arboard::Clipboard::new()?;
-                clipboard.set_text(&option_num)?;
+                set_clipboard_pbcopy(&option_num)?;
+                eprintln!("[select] terminal_app=Terminal → clipboard set to '{}'", option_num);
                 jump_to_session(pid)?;
                 return Ok("clipboard_only".to_string());
             }
+            "Visual Studio Code" => {
+                let option_num = format!("{}", down_presses + 1);
+                set_clipboard_pbcopy(&option_num)?;
+                eprintln!("[select] terminal_app=Visual Studio Code → auto-paste '{}'", option_num);
+                vscode_paste_and_enter();
+                return Ok("auto_sent".to_string());
+            }
             _ => {
                 let option_num = format!("{}", down_presses + 1);
-                let mut clipboard = arboard::Clipboard::new()?;
-                clipboard.set_text(&option_num)?;
+                set_clipboard_pbcopy(&option_num)?;
+                eprintln!("[select] terminal_app={} → clipboard set to '{}'", terminal_app, option_num);
                 jump_to_session(pid)?;
                 return Ok("clipboard_only".to_string());
             }
@@ -1466,10 +1509,15 @@ pub fn select_multi_option(pid: u32, selected_indices: &[u32], _total_options: u
                     .output();
                 return Ok("auto_sent".to_string());
             }
+            "Visual Studio Code" => {
+                let option_nums = selected_indices.iter().map(|i| format!("{}", i + 1)).collect::<Vec<_>>().join(",");
+                set_clipboard_pbcopy(&option_nums)?;
+                vscode_paste_and_enter();
+                return Ok("auto_sent".to_string());
+            }
             _ => {
                 let option_nums = selected_indices.iter().map(|i| format!("{}", i + 1)).collect::<Vec<_>>().join(",");
-                let mut clipboard = arboard::Clipboard::new()?;
-                clipboard.set_text(&option_nums)?;
+                set_clipboard_pbcopy(&option_nums)?;
                 jump_to_session(pid)?;
                 return Ok("clipboard_only".to_string());
             }
@@ -1483,8 +1531,7 @@ pub fn select_multi_option(pid: u32, selected_indices: &[u32], _total_options: u
 /// Returns "auto_sent" if the text was automatically sent, "clipboard_only" if user needs to paste.
 pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::error::Error>> {
     // 1. Copy text to clipboard
-    let mut clipboard = arboard::Clipboard::new()?;
-    clipboard.set_text(&text)?;
+    set_clipboard_pbcopy(&text)?;
 
     // 2. Find TTY and detect terminal
     let output = std::process::Command::new("lsof")
@@ -1562,6 +1609,10 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
             "Ghostty" => {
                 ghostty_raise_window(Some(tty_path));
                 return Ok("clipboard_only".to_string());
+            }
+            "Visual Studio Code" => {
+                vscode_paste_and_enter();
+                return Ok("auto_sent".to_string());
             }
             "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
                 let _ = std::process::Command::new("osascript")
@@ -1830,6 +1881,12 @@ fn trace_to_terminal(start_pid: u32) -> Option<String> {
         if comm.contains("pycharm") {
             return Some("PyCharm".to_string());
         }
+        // VSCode: on macOS `ps -o comm=` returns the full executable path, e.g.
+        // /applications/visual studio code.app/contents/macos/electron or
+        // .../frameworks/code helper (plugin).app/contents/macos/code helper (plugin)
+        if comm.contains("visual studio code") || comm.contains("code helper") {
+            return Some("Visual Studio Code".to_string());
+        }
         if comm.contains("terminal") && !comm.contains("login") {
             return Some("Terminal".to_string());
         }
@@ -1865,6 +1922,8 @@ fn detect_terminal_app() -> String {
         ("webstorm", "WebStorm"),
         ("pycharm", "PyCharm"),
         ("terminal.app", "Terminal"),
+        ("visual studio code", "Visual Studio Code"),
+        ("code helper", "Visual Studio Code"),
     ];
     for (pattern, name) in &terminals {
         if all_args.contains(pattern) {

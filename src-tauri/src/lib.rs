@@ -1,10 +1,13 @@
 mod claude;
 mod approval;
 mod socket;
+mod settings;
 
 use approval::{ApprovalDecision, ApprovalServer, PendingApproval};
 use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PendingQuestion, PermissionConfig, Prerequisites, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
-use tauri::PhysicalPosition;
+use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, WebviewWindow};
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::tray::TrayIcon;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 #[tauri::command]
@@ -147,49 +150,206 @@ struct NotchInfo {
 }
 
 #[cfg(target_os = "macos")]
-fn detect_notch() -> NotchInfo {
+unsafe fn nsscreen_localized_name(screen: cocoa::base::id) -> Option<String> {
+    use objc::{msg_send, sel, sel_impl};
+    let ns_name: cocoa::base::id = msg_send![screen, localizedName];
+    if ns_name.is_null() {
+        return None;
+    }
+    let utf8: *const i8 = msg_send![ns_name, UTF8String];
+    if utf8.is_null() {
+        return None;
+    }
+    Some(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn detect_notch_for_name(target: Option<&str>) -> NotchInfo {
     use objc::{msg_send, sel, sel_impl, class};
     use cocoa::foundation::NSRect;
 
     unsafe {
         let screens: cocoa::base::id = msg_send![class!(NSScreen), screens];
-        let main_screen: cocoa::base::id = msg_send![screens, objectAtIndex: 0usize];
+        let count: usize = msg_send![screens, count];
+        for i in 0..count {
+            let screen: cocoa::base::id = msg_send![screens, objectAtIndex: i];
+            let matches = match target {
+                Some(t) => nsscreen_localized_name(screen).as_deref() == Some(t),
+                None => i == 0,
+            };
+            if !matches { continue; }
 
-        // safeAreaInsets maps to NSEdgeInsets { top, left, bottom, right }
-        // via NSRect fields: origin.x=top, origin.y=left, size.width=bottom, size.height=right
-        let insets: cocoa::foundation::NSRect = msg_send![main_screen, safeAreaInsets];
-        let top_inset = insets.origin.x;
-
-        if top_inset > 0.0 {
-            let frame: NSRect = msg_send![main_screen, frame];
-            let aux_left: NSRect = msg_send![main_screen, auxiliaryTopLeftArea];
-            let aux_right: NSRect = msg_send![main_screen, auxiliaryTopRightArea];
-
-            // notch = the gap between the two auxiliary top areas
-            let notch_width = frame.size.width - aux_left.size.width - aux_right.size.width;
-            let notch_height = top_inset;
-            let pill_width = (notch_width + 120.0).max(350.0);
-
-            NotchInfo {
-                has_notch: true,
-                notch_width,
-                notch_height,
-                pill_width,
+            let insets: NSRect = msg_send![screen, safeAreaInsets];
+            let top_inset = insets.origin.x;
+            if top_inset > 0.0 {
+                let frame: NSRect = msg_send![screen, frame];
+                let aux_left: NSRect = msg_send![screen, auxiliaryTopLeftArea];
+                let aux_right: NSRect = msg_send![screen, auxiliaryTopRightArea];
+                let notch_width = frame.size.width - aux_left.size.width - aux_right.size.width;
+                let notch_height = top_inset;
+                let pill_width = (notch_width + 120.0).max(350.0);
+                return NotchInfo { has_notch: true, notch_width, notch_height, pill_width };
             }
-        } else {
-            NotchInfo {
-                has_notch: false,
-                notch_width: 0.0,
-                notch_height: 0.0,
-                pill_width: 240.0,
-            }
+            break;
         }
+        NotchInfo { has_notch: false, notch_width: 0.0, notch_height: 0.0, pill_width: 240.0 }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_notch() -> NotchInfo { detect_notch_for_name(None) }
+
+#[cfg(not(target_os = "macos"))]
+fn detect_notch_for_name(_target: Option<&str>) -> NotchInfo {
+    NotchInfo { has_notch: false, notch_width: 0.0, notch_height: 0.0, pill_width: 240.0 }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn detect_notch() -> NotchInfo {
     NotchInfo { has_notch: false, notch_width: 0.0, notch_height: 0.0, pill_width: 240.0 }
+}
+
+// ── Display enumeration & positioning ──
+
+#[derive(serde::Serialize, Clone, Debug)]
+struct DisplayInfo {
+    index: u32,
+    name: String,
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    is_primary: bool,
+    is_current_selection: bool,
+}
+
+fn monitor_display_name(monitor: &Monitor, fallback_index: u32) -> String {
+    monitor
+        .name()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("Display {}", fallback_index + 1))
+}
+
+fn pick_monitor(window: &WebviewWindow, settings: &settings::AppSettings) -> Option<Monitor> {
+    let monitors = window.available_monitors().ok()?;
+    if let Some(ref name) = settings.preferred_display_name {
+        for m in &monitors {
+            if monitor_display_name(m, 0) == *name {
+                return Some(m.clone());
+            }
+        }
+    }
+    if let Some(idx) = settings.preferred_display_index {
+        if let Some(m) = monitors.get(idx as usize) {
+            return Some(m.clone());
+        }
+    }
+    window.primary_monitor().ok().flatten().or_else(|| monitors.first().cloned())
+}
+
+fn position_on_monitor(window: &WebviewWindow, monitor: &Monitor) -> Result<(), String> {
+    let notch = detect_notch_for_name(monitor.name().map(|s| s.as_str()));
+    let screen = monitor.size();
+    let mon_pos = monitor.position();
+    let scale = monitor.scale_factor();
+    let logical_w = if notch.has_notch { notch.pill_width } else { 350.0 };
+    let logical_h = 500.0;
+    let phys_w = (logical_w * scale) as u32;
+    let phys_h = (logical_h * scale) as u32;
+    let x = mon_pos.x + ((screen.width as f64 - phys_w as f64) / 2.0) as i32;
+    let y = mon_pos.y;
+
+    // Move to target monitor FIRST so macOS adopts the new backing scale,
+    // then size with logical units so the final size is correct on the target screen.
+    window
+        .set_position(tauri::Position::Physical(PhysicalPosition::new(x, y)))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(logical_w, logical_h)))
+        .map_err(|e| e.to_string())?;
+    // Re-apply position after size change, since some WMs re-center on resize.
+    window
+        .set_position(tauri::Position::Physical(PhysicalPosition::new(x, y)))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn apply_preferred_display(app: &AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("main window missing")?;
+    let settings = settings::load(app);
+    let monitor = pick_monitor(&window, &settings).ok_or("no monitors available")?;
+    position_on_monitor(&window, &monitor)?;
+
+    // macOS needs time to adopt the new screen's backing scale & safe-area after
+    // a cross-monitor move. Re-apply twice with small delays so the final notch
+    // detection and sizing use the correct screen state.
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        for delay_ms in [120u64, 300u64] {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            let Some(window) = app_clone.get_webview_window("main") else { return };
+            let settings = settings::load(&app_clone);
+            let Some(monitor) = pick_monitor(&window, &settings) else { return };
+            let _ = position_on_monitor(&window, &monitor);
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn list_displays(app: AppHandle) -> Result<Vec<DisplayInfo>, String> {
+    let window = app.get_webview_window("main").ok_or("main window missing")?;
+    let monitors = window.available_monitors().map_err(|e| e.to_string())?;
+    let primary = window.primary_monitor().ok().flatten();
+    let primary_name = primary.as_ref().map(|m| monitor_display_name(m, 0));
+    let settings = settings::load(&app);
+    let current = pick_monitor(&window, &settings).map(|m| monitor_display_name(&m, 0));
+
+    Ok(monitors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let name = monitor_display_name(m, i as u32);
+            let size = m.size();
+            let pos = m.position();
+            DisplayInfo {
+                index: i as u32,
+                is_primary: Some(&name) == primary_name.as_ref(),
+                is_current_selection: Some(&name) == current.as_ref(),
+                name,
+                width: size.width,
+                height: size.height,
+                x: pos.x,
+                y: pos.y,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn get_preferred_display(app: AppHandle) -> settings::AppSettings {
+    settings::load(&app)
+}
+
+#[tauri::command]
+fn set_preferred_display(app: AppHandle, name: String) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("main window missing")?;
+    let monitors = window.available_monitors().map_err(|e| e.to_string())?;
+    let index = monitors
+        .iter()
+        .position(|m| monitor_display_name(m, 0) == name)
+        .map(|i| i as u32);
+    let new_settings = settings::AppSettings {
+        preferred_display_name: Some(name),
+        preferred_display_index: index,
+    };
+    settings::save(&app, &new_settings)?;
+    apply_preferred_display(&app)?;
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = rebuild_tray_menu(&app, &tray);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -217,22 +377,39 @@ fn update_island_bounds(
 }
 
 #[tauri::command]
-fn center_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    let notch = detect_notch();
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        let screen = monitor.size();
-        let scale = monitor.scale_factor();
-        let logical_w = if notch.has_notch { notch.pill_width } else { 350.0 };
-        let logical_h = 500.0;
-        let phys_w = (logical_w * scale) as u32;
-        let phys_h = (logical_h * scale) as u32;
-        let x = ((screen.width as f64 - phys_w as f64) / 2.0) as i32;
-        let _ = window.set_size(tauri::Size::Physical(
-            tauri::PhysicalSize::new(phys_w, phys_h),
-        ));
-        window.set_position(tauri::Position::Physical(PhysicalPosition::new(x, 0)))
-            .map_err(|e| e.to_string())?;
+fn center_window(app: AppHandle) -> Result<(), String> {
+    apply_preferred_display(&app)
+}
+
+// ── Tray menu with Display submenu ──
+
+fn rebuild_tray_menu(app: &AppHandle, tray: &TrayIcon) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("main window missing")?;
+    let monitors = window.available_monitors().map_err(|e| e.to_string())?;
+    let settings = settings::load(app);
+    let current = pick_monitor(&window, &settings).map(|m| monitor_display_name(&m, 0));
+
+    let mut display_sub = SubmenuBuilder::new(app, "Display");
+    for (i, m) in monitors.iter().enumerate() {
+        let name = monitor_display_name(m, i as u32);
+        let mark = if Some(&name) == current.as_ref() { "✓ " } else { "   " };
+        let size = m.size();
+        let label = format!("{}{} ({}×{})", mark, name, size.width, size.height);
+        let id = format!("display::{}", name);
+        display_sub = display_sub.text(id, label);
     }
+    let display_menu = display_sub.build().map_err(|e| e.to_string())?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&display_menu)
+        .separator()
+        .text("reload", "Reload")
+        .separator()
+        .text("quit", "Quit")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -295,9 +472,11 @@ pub fn run() {
             get_notch_info,
             update_island_bounds,
             center_window,
+            list_displays,
+            get_preferred_display,
+            set_preferred_display,
         ])
         .setup(move |app| {
-            use tauri::Manager;
             use tauri::tray::TrayIconBuilder;
 
             // ── System Tray (pixel cat icon) ──
@@ -311,18 +490,29 @@ pub fn run() {
                 tauri::image::Image::new_owned(buf, info.width, info.height)
             };
 
-            let menu = tauri::menu::MenuBuilder::new(app)
+            let placeholder_menu = MenuBuilder::new(app)
                 .text("reload", "Reload")
                 .separator()
                 .text("quit", "Quit")
                 .build()?;
 
-            TrayIconBuilder::new()
+            let tray = TrayIconBuilder::with_id("main")
                 .icon(tray_icon)
                 .tooltip("Claude Cat Monitor")
-                .menu(&menu)
+                .menu(&placeholder_menu)
                 .on_menu_event(|app, event| {
-                    match event.id().as_ref() {
+                    let id = event.id().as_ref().to_string();
+                    if let Some(name) = id.strip_prefix("display::") {
+                        let app_clone = app.clone();
+                        let name = name.to_string();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = set_preferred_display(app_clone, name) {
+                                eprintln!("[display] set_preferred_display failed: {e}");
+                            }
+                        });
+                        return;
+                    }
+                    match id.as_str() {
                         "reload" => {
                             if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.eval("location.reload()");
@@ -336,9 +526,29 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ── macOS adjustments first (these can shift the window) ──
-            let notch = detect_notch();
+            let _ = rebuild_tray_menu(app.handle(), &tray);
 
+            // Poll for monitor hot-plug changes; only rebuild when the count actually changes,
+            // so we don't collapse an open tray menu.
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut last_count: usize = 0;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        let Some(window) = app_handle.get_webview_window("main") else { continue };
+                        let Ok(monitors) = window.available_monitors() else { continue };
+                        if monitors.len() != last_count {
+                            last_count = monitors.len();
+                            if let Some(tray) = app_handle.tray_by_id("main") {
+                                let _ = rebuild_tray_menu(&app_handle, &tray);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // ── macOS adjustments first (these can shift the window) ──
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
                 {
@@ -355,22 +565,7 @@ pub fn run() {
 
             // ── Fixed-size transparent window (positioned AFTER macOS adjustments) ──
             if let Some(window) = app.get_webview_window("main") {
-                if let Ok(Some(monitor)) = window.current_monitor() {
-                    let screen = monitor.size();
-                    let scale = monitor.scale_factor();
-                    let logical_w = if notch.has_notch { notch.pill_width } else { 350.0 };
-                    let logical_h = 500.0;
-                    let phys_w = (logical_w * scale) as u32;
-                    let phys_h = (logical_h * scale) as u32;
-
-                    let x = ((screen.width as f64 - phys_w as f64) / 2.0) as i32;
-                    let _ = window.set_size(tauri::Size::Physical(
-                        tauri::PhysicalSize::new(phys_w, phys_h),
-                    ));
-                    let _ = window.set_position(tauri::Position::Physical(
-                        PhysicalPosition::new(x, 0),
-                    ));
-                }
+                let _ = apply_preferred_display(app.handle());
 
                 // Start fully click-through; cursor tracking thread toggles this
                 let _ = window.set_ignore_cursor_events(true);

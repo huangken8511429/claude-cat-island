@@ -101,6 +101,9 @@ function App() {
   const lastAutoNotifyBySession = useRef<Map<string, number>>(new Map());
   const approvalFirstSeen = useRef<Map<string, number>>(new Map());
   const lastApprovalBlipTs = useRef(0);
+  // Pin full mode after answering a question, so auto-collapse doesn't fire
+  // while the user is still reading the hint / switching to terminal to paste.
+  const pinFullUntil = useRef(0);
 
   useEffect(() => {
     const unlock = () => { initAudio(); setAudioReady(true); document.removeEventListener("click", unlock); };
@@ -158,7 +161,10 @@ function App() {
 
   const handleMouseLeave = useCallback(() => {
     isHovering.current = false;
-    collapseTimer.current = setTimeout(() => setMode("pill"), 300);
+    collapseTimer.current = setTimeout(() => {
+      if (Date.now() < pinFullUntil.current) return;
+      setMode("pill");
+    }, 300);
   }, []);
 
   // ── Safety: collapse when mouse leaves the Tauri window entirely ──
@@ -170,7 +176,10 @@ function App() {
     const onWindowMouseLeave = () => {
       if (isHovering.current) {
         isHovering.current = false;
-        collapseTimer.current = setTimeout(() => setMode("pill"), 300);
+        collapseTimer.current = setTimeout(() => {
+          if (Date.now() < pinFullUntil.current) return;
+          setMode("pill");
+        }, 300);
       }
     };
     document.documentElement.addEventListener("mouseleave", onWindowMouseLeave);
@@ -193,7 +202,8 @@ function App() {
         latestMode.current === "full" &&
         !isHovering.current &&
         fullModeEnteredAt.current > 0 &&
-        Date.now() - fullModeEnteredAt.current > 15_000
+        Date.now() - fullModeEnteredAt.current > 15_000 &&
+        Date.now() >= pinFullUntil.current
       ) {
         setMode("pill");
       }
@@ -582,7 +592,7 @@ function App() {
               </div>
             )}
             <main className="content">
-              {tab === "sessions" && <SessionPanel sessions={sessions} pendingStates={pendingStates} pendingApprovals={pendingApprovals} pendingQuestions={pendingQuestions} onResolveApproval={handleResolveApproval} onRefresh={refresh} onDetailChange={setInDetail} />}
+              {tab === "sessions" && <SessionPanel sessions={sessions} pendingStates={pendingStates} pendingApprovals={pendingApprovals} pendingQuestions={pendingQuestions} onResolveApproval={handleResolveApproval} onRefresh={() => { pinFullUntil.current = Date.now() + 8000; clearTimers(); isHovering.current = true; setMode("full"); refresh(); }} onDetailChange={setInDetail} />}
               {tab === "tokens" && <TokenPanel stats={stats} live={live} />}
               {tab === "skills" && <SkillPanel skills={skills} onDetailChange={setInDetail} />}
               {tab === "permissions" && (

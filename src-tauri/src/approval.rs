@@ -31,6 +31,7 @@ pub struct HookPermissionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingApproval {
     pub id: String,
     pub session_id: String,
