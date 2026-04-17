@@ -553,9 +553,16 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 {
                     use cocoa::appkit::NSWindow;
+                    use objc::{msg_send, sel, sel_impl, class};
                     let ns_win: cocoa::base::id = window.ns_window().unwrap() as cocoa::base::id;
                     unsafe {
                         ns_win.setLevel_(25);
+                        // Explicit transparency setup — required on macOS Sequoia (15+)
+                        // where Tauri's `transparent: true` alone is insufficient.
+                        let clear: cocoa::base::id = msg_send![class!(NSColor), clearColor];
+                        ns_win.setBackgroundColor_(clear);
+                        ns_win.setOpaque_(cocoa::base::NO);
+                        ns_win.setHasShadow_(cocoa::base::NO);
                     }
                 }
             }
