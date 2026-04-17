@@ -6,7 +6,9 @@ import QuickReply from "./QuickReply";
 
 interface Props {
   session: ClaudeSession;
+  sessions: ClaudeSession[];
   themeIndex?: number;
+  onSelectSession: (session: ClaudeSession) => void;
   onBack: () => void;
 }
 
@@ -31,13 +33,26 @@ const TOOL_ICONS: Record<string, string> = {
   Skill: "S",
 };
 
-export default function SessionDetail({ session, themeIndex, onBack }: Props) {
+async function handleJump(pid: number) {
+  try {
+    await invoke("jump_to_session", { pid });
+  } catch (err) {
+    console.error("Jump failed:", err);
+  }
+}
+
+export default function SessionDetail({ session, sessions, themeIndex, onSelectSession, onBack }: Props) {
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showSwitcher, setShowSwitcher] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const otherSessions = sessions.filter((item) => item.sessionId !== session.sessionId);
 
   useEffect(() => {
     let cancelled = false;
+
+    setLoading(true);
+    setMessages([]);
 
     const load = async () => {
       try {
@@ -80,7 +95,59 @@ export default function SessionDetail({ session, themeIndex, onBack }: Props) {
         <span className="detail-project-compact">{getProjectName(session.cwd)}</span>
         <span className={`status-dot ${state}`} />
         <span className="detail-state-compact">{state.toUpperCase()}</span>
+        {otherSessions.length > 0 && (
+          <button
+            className={`detail-switch-btn ${showSwitcher ? "active" : ""}`}
+            onClick={() => setShowSwitcher((prev) => !prev)}
+            aria-expanded={showSwitcher}
+            aria-label="Open session switcher"
+          >
+            JUMP TO
+          </button>
+        )}
       </div>
+
+      {showSwitcher && otherSessions.length > 0 && (
+        <div className="session-switcher">
+          <div className="session-switcher-header">
+            <span className="session-switcher-title">Switch Session</span>
+            <span className="session-switcher-hint">Jump or open another live thread without backing out.</span>
+          </div>
+          <div className="session-switcher-list">
+            {otherSessions.map((candidate) => (
+              <div key={candidate.sessionId} className="session-switcher-item">
+                <div className="session-switcher-info">
+                  <span className="session-switcher-project">{getProjectName(candidate.cwd)}</span>
+                  <span className="session-switcher-meta">
+                    {candidate.isAlive ? candidate.kind.toUpperCase() : "DONE"}
+                    <span className="sep">|</span>
+                    {candidate.sessionId.slice(0, 8)}
+                  </span>
+                </div>
+                <div className="session-switcher-actions">
+                  <button
+                    className="session-switcher-btn"
+                    onClick={() => {
+                      onSelectSession(candidate);
+                      setShowSwitcher(false);
+                    }}
+                  >
+                    OPEN
+                  </button>
+                  {candidate.isAlive ? (
+                    <button
+                      className="session-switcher-btn accent"
+                      onClick={() => handleJump(candidate.pid)}
+                    >
+                      JUMP
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Conversation */}
       <div className="transcript">

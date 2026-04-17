@@ -130,11 +130,11 @@ function App() {
       w = notchInfo?.has_notch ? notchInfo.notch_width + 60 : 240;
       h = notchInfo?.has_notch ? notchInfo.notch_height + 25 : 36;
     } else if (mode === "notification") {
-      w = Math.max(340, notchInfo?.has_notch ? notchInfo.notch_width + 80 : 340);
+      w = Math.max(380, notchInfo?.has_notch ? notchInfo.notch_width + 80 : 380);
       h = 68;
     } else {
-      w = 340;
-      h = inDetail ? 480 : Math.min(400, Math.max(180, 100 + sessions.length * 48));
+      w = 420;
+      h = inDetail ? 560 : Math.min(540, Math.max(200, 120 + sessions.length * 52));
     }
     return { w, h };
   };
@@ -142,7 +142,7 @@ function App() {
 
   // ── Sync island bounds to Rust for click-through toggling ──
   useEffect(() => {
-    const windowW = notchInfo?.has_notch ? notchInfo.pill_width : 350;
+    const windowW = notchInfo?.has_notch ? notchInfo.pill_width : 440;
     const x = (windowW - islandWidth) / 2;
     invoke("update_island_bounds", { x, y: 0, w: islandWidth, h: islandHeight }).catch(() => {});
   }, [islandWidth, islandHeight, notchInfo]);

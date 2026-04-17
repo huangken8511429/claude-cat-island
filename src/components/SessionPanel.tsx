@@ -118,7 +118,13 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
     return (
       <SessionDetail
         session={selected.session}
+        sessions={sessions}
         themeIndex={selected.index}
+        onSelectSession={(nextSession) => {
+          const nextIndex = sessions.findIndex((item) => item.sessionId === nextSession.sessionId);
+          setSelected({ session: nextSession, index: nextIndex >= 0 ? nextIndex : 0 });
+          onDetailChange?.(true);
+        }}
         onBack={() => { setSelected(null); onDetailChange?.(false); }}
       />
     );
@@ -175,38 +181,41 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
                 }
               }}
             >
-              <CatLogo state={state} size={20} themeIndex={i} />
-              <div className="session-info">
-                <div className="session-project">
-                  {getProjectName(session.cwd)}
-                  {isQuestion && <span className="pending-badge question">QUESTION</span>}
-                  {isApproval && <span className="pending-badge approve">APPROVE</span>}
-                  {isWaiting && !isQuestion && <span className="pending-badge ask">ASK</span>}
-                </div>
-                <div className="session-meta">
-                  <span className={`status-dot ${state}`} />
-                  <span>{isQuestion ? "QUESTION" : isApproval ? "NEEDS APPROVAL" : isWaiting ? "WAITING INPUT" : state.toUpperCase()}</span>
-                  {pending?.tool_name && (
-                    <>
-                      <span className="sep">|</span>
-                      <span className="pending-tool">{pending.tool_name}</span>
-                    </>
-                  )}
-                  <span className="sep">|</span>
-                  <span>{formatTime(session.startedAt)}</span>
-                  <span className="sep">|</span>
-                  <span>{formatDuration(session.startedAt)}</span>
-                </div>
-                {lastMsg && (
-                  <div className={`session-last-msg role-${lastMsg.role}`}>
-                    <span className="last-msg-role">{lastMsg.role === "user" ? "YOU" : "CLAUDE"}</span>
-                    <span className="last-msg-text">{truncateText(lastMsg.text, 120)}</span>
+              <div className="session-card-top">
+                <CatLogo state={state} size={20} themeIndex={i} />
+                <div className="session-info">
+                  <div className="session-project">
+                    {getProjectName(session.cwd)}
+                    {isQuestion && <span className="pending-badge question">QUESTION</span>}
+                    {isApproval && <span className="pending-badge approve">APPROVE</span>}
+                    {isWaiting && !isQuestion && <span className="pending-badge ask">ASK</span>}
                   </div>
-                )}
+                  <div className="session-meta">
+                    <span className={`status-dot ${state}`} />
+                    <span>{isQuestion ? "QUESTION" : isApproval ? "NEEDS APPROVAL" : isWaiting ? "WAITING INPUT" : state.toUpperCase()}</span>
+                    {pending?.tool_name && (
+                      <>
+                        <span className="sep">|</span>
+                        <span className="pending-tool">{pending.tool_name}</span>
+                      </>
+                    )}
+                    <span className="sep">|</span>
+                    <span>{formatTime(session.startedAt)}</span>
+                    <span className="sep">|</span>
+                    <span>{formatDuration(session.startedAt)}</span>
+                  </div>
+                  {lastMsg && (
+                    <div className={`session-last-msg role-${lastMsg.role}`}>
+                      <span className="last-msg-role">{lastMsg.role === "user" ? "YOU" : "CLAUDE"}</span>
+                      <span className="last-msg-text">{truncateText(lastMsg.text, 120)}</span>
+                    </div>
+                  )}
+                </div>
+                <div className="session-arrow">▸</div>
               </div>
-              {(isApproval || isWaiting) && !isQuestion && (
+              {session.isAlive && (
                 <button
-                  className={`jump-btn ${isApproval ? "approve" : "ask"}`}
+                  className={`jump-btn full-width ${isApproval ? "approve" : isWaiting ? "ask" : ""}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     handleJump(session.pid);
@@ -216,7 +225,6 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
                   JUMP
                 </button>
               )}
-              <div className="session-arrow">▸</div>
               {isApproval && pendingApprovals.filter(a => a.sessionId === session.sessionId).length > 0 && (
                 <div className="inline-approval" onClick={(e) => e.stopPropagation()}>
                   {pendingApprovals.filter(a => a.sessionId === session.sessionId).map((a) => (

@@ -187,7 +187,7 @@ fn detect_notch_for_name(target: Option<&str>) -> NotchInfo {
                 let aux_right: NSRect = msg_send![screen, auxiliaryTopRightArea];
                 let notch_width = frame.size.width - aux_left.size.width - aux_right.size.width;
                 let notch_height = top_inset;
-                let pill_width = (notch_width + 120.0).max(350.0);
+                let pill_width = (notch_width + 120.0).max(440.0);
                 return NotchInfo { has_notch: true, notch_width, notch_height, pill_width };
             }
             break;
@@ -253,8 +253,8 @@ fn position_on_monitor(window: &WebviewWindow, monitor: &Monitor) -> Result<(), 
     let screen = monitor.size();
     let mon_pos = monitor.position();
     let scale = monitor.scale_factor();
-    let logical_w = if notch.has_notch { notch.pill_width } else { 350.0 };
-    let logical_h = 500.0;
+    let logical_w = if notch.has_notch { notch.pill_width } else { 440.0 };
+    let logical_h = 600.0;
     let phys_w = (logical_w * scale) as u32;
     let phys_h = (logical_h * scale) as u32;
     let x = mon_pos.x + ((screen.width as f64 - phys_w as f64) / 2.0) as i32;
