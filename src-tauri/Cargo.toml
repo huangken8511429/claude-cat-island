@@ -1,6 +1,6 @@
 [package]
 name = "claude-cat-monitor"
-version = "0.3.0"
+version = "0.3.4"
 description = "Pixel cat dashboard for monitoring Claude Code sessions"
 authors = ["Caresys"]
 edition = "2021"

@@ -73,6 +73,8 @@ function App() {
   const [prereqs, setPrereqs] = useState<Prerequisites | null>(null);
   const [toolStatuses, setToolStatuses] = useState<Record<string, ToolStatus>>({});
   const [notchInfo, setNotchInfo] = useState<{ has_notch: boolean; notch_width: number; notch_height: number; pill_width: number } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const ctxMenuRef = useRef<{ x: number; y: number } | null>(null);
 
   // Inline approval count for use in effects (avoids TDZ with later-declared derived values)
   const approvalNeededCount = pendingStates.filter(ps => ps.pending === "needs_approval").length + pendingApprovals.length;
@@ -140,7 +142,8 @@ function App() {
       h = 68;
     } else {
       w = 420;
-      h = inDetail ? 560 : Math.min(540, Math.max(200, 120 + sessions.length * 52));
+      const aliveCount = sessions.filter((s) => s.isAlive).length;
+      h = inDetail ? 560 : Math.min(540, Math.max(200, 120 + aliveCount * 52));
     }
     return { w, h };
   };
@@ -167,6 +170,8 @@ function App() {
 
   const handleMouseLeave = useCallback(() => {
     isHovering.current = false;
+    // Don't collapse while context menu is visible
+    if (ctxMenuRef.current) return;
     collapseTimer.current = setTimeout(() => {
       if (Date.now() < pinFullUntil.current) return;
       setMode("pill");
@@ -182,6 +187,7 @@ function App() {
     const onWindowMouseLeave = () => {
       if (isHovering.current) {
         isHovering.current = false;
+        if (ctxMenuRef.current) return;
         collapseTimer.current = setTimeout(() => {
           if (Date.now() < pinFullUntil.current) return;
           setMode("pill");
@@ -200,7 +206,7 @@ function App() {
   useEffect(() => {
     const onBlur = () => {
       setTimeout(() => {
-        if (!document.hasFocus() && Date.now() >= pinFullUntil.current) {
+        if (!document.hasFocus() && Date.now() >= pinFullUntil.current && !ctxMenuRef.current) {
           isHovering.current = false;
           setMode("pill");
         }
@@ -209,6 +215,40 @@ function App() {
     window.addEventListener("blur", onBlur);
     return () => window.removeEventListener("blur", onBlur);
   }, []);
+
+  // ── Context menu (right-click → Quit) ──
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      setCtxMenu({ x: e.clientX, y: e.clientY });
+    };
+    const onDismiss = () => setCtxMenu(null);
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
+    document.addEventListener("contextmenu", onContextMenu);
+    document.addEventListener("click", onDismiss);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("contextmenu", onContextMenu);
+      document.removeEventListener("click", onDismiss);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
+  // Sync ctxMenu ref & manage click-through bounds while context menu is open
+  useEffect(() => {
+    ctxMenuRef.current = ctxMenu;
+    if (ctxMenu) {
+      // Pin full mode so island doesn't collapse while menu is visible
+      clearTimers();
+      pinFullUntil.current = Date.now() + 60_000;
+      // Expand click-through bounds to full window so the menu stays clickable
+      const windowW = notchInfo?.has_notch ? notchInfo.pill_width : 440;
+      invoke("update_island_bounds", { x: 0, y: 0, w: windowW, h: 600 }).catch(() => {});
+    } else {
+      // Release pin — allow normal collapse
+      pinFullUntil.current = 0;
+    }
+  }, [ctxMenu, notchInfo]);
 
   // ── Safety: periodic stuck-full detection ──
   // If the window has been in full mode for 15s without hover, force collapse.
@@ -516,8 +556,56 @@ function App() {
     ? "island-glow-working"
     : "";
 
+  const [ctxDisplays, setCtxDisplays] = useState<{ name: string; width: number; height: number; is_current_selection: boolean }[]>([]);
+
+  const handleQuit = () => {
+    setCtxMenu(null);
+    invoke("quit_app");
+  };
+
+  const handleReload = () => {
+    setCtxMenu(null);
+    location.reload();
+  };
+
+  const handleSwitchDisplay = (name: string) => {
+    setCtxMenu(null);
+    invoke("set_preferred_display", { name });
+  };
+
+  // Fetch display list when context menu opens
+  useEffect(() => {
+    if (ctxMenu) {
+      invoke<{ name: string; width: number; height: number; is_current_selection: boolean }[]>("list_displays")
+        .then(setCtxDisplays)
+        .catch(() => setCtxDisplays([]));
+    }
+  }, [ctxMenu]);
+
   return (
     <div className="island-container">
+      {ctxMenu && (
+        <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+          {ctxDisplays.length > 1 && (
+            <>
+              <div className="ctx-menu-label">Display</div>
+              {ctxDisplays.map((d) => (
+                <button
+                  key={d.name}
+                  className={`ctx-menu-item ctx-menu-display ${d.is_current_selection ? "active" : ""}`}
+                  onClick={() => handleSwitchDisplay(d.name)}
+                >
+                  {d.is_current_selection ? "✓ " : "   "}{d.name} ({d.width}×{d.height})
+                </button>
+              ))}
+              <div className="ctx-menu-sep" />
+            </>
+          )}
+          <button className="ctx-menu-item" onClick={handleReload}>Reload</button>
+          <div className="ctx-menu-sep" />
+          <button className="ctx-menu-item ctx-menu-quit" onClick={handleQuit}>Quit</button>
+        </div>
+      )}
       <div ref={islandRef} className={`island island-${mode} ${glowClass} ${notchInfo?.has_notch ? "island-notch" : ""}`} style={{ width: islandWidth, height: islandHeight, ...(notchInfo?.has_notch ? { "--notch-h": `${notchInfo.notch_height}px` } : {}) } as React.CSSProperties} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
 
         {/* ── Pill content (always rendered, visible in pill mode) ── */}

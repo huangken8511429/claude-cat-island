@@ -92,10 +92,12 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
   const [selected, setSelected] = useState<{ session: ClaudeSession; index: number } | null>(null);
   const [lastMessages, setLastMessages] = useState<Record<string, TranscriptMessage>>({});
 
+  const aliveSessions = sessions.filter((s) => s.isAlive);
+
   const fetchLastMessages = useCallback(async () => {
     const results: Record<string, TranscriptMessage> = {};
     await Promise.all(
-      sessions.map(async (s) => {
+      aliveSessions.map(async (s) => {
         try {
           const msg = await invoke<TranscriptMessage | null>("get_session_last_message", {
             sessionId: s.sessionId,
@@ -106,7 +108,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
       })
     );
     setLastMessages(results);
-  }, [sessions]);
+  }, [aliveSessions.map((s) => s.sessionId).join(",")]);
 
   useEffect(() => {
     fetchLastMessages();
@@ -118,10 +120,10 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
     return (
       <SessionDetail
         session={selected.session}
-        sessions={sessions}
+        sessions={aliveSessions}
         themeIndex={selected.index}
         onSelectSession={(nextSession) => {
-          const nextIndex = sessions.findIndex((item) => item.sessionId === nextSession.sessionId);
+          const nextIndex = aliveSessions.findIndex((item) => item.sessionId === nextSession.sessionId);
           setSelected({ session: nextSession, index: nextIndex >= 0 ? nextIndex : 0 });
           onDetailChange?.(true);
         }}
@@ -130,7 +132,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
     );
   }
 
-  if (sessions.length === 0) {
+  if (aliveSessions.length === 0) {
     return (
        <div className="panel session-panel">
          <h2 className="panel-title">SESSIONS</h2>
@@ -149,7 +151,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
   return (
     <div className="panel session-panel">
       <h2 className="panel-title">
-        SESSIONS <span className="badge">{sessions.length}</span>
+        SESSIONS <span className="badge">{aliveSessions.length}</span>
       </h2>
       {pendingApprovals.length > 0 && (
         <div className="approval-banner">
@@ -175,7 +177,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
         </div>
       )}
       <div className="session-grid">
-        {sessions.map((session, i) => {
+        {aliveSessions.map((session, i) => {
           const pending = pendingStates.find((ps) => ps.session_id === session.sessionId);
           const lastMsg = lastMessages[session.sessionId];
           const sessionQuestion = pendingQuestions.find(q => q.sessionId === session.sessionId);

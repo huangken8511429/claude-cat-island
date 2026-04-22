@@ -590,6 +590,11 @@ fn ensure_transparency(app: AppHandle) {
     }
 }
 
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Start approval HTTP server
@@ -636,6 +641,7 @@ pub fn run() {
             list_displays,
             get_preferred_display,
             set_preferred_display,
+            quit_app,
         ])
         .setup(move |app| {
             use tauri::tray::TrayIconBuilder;
