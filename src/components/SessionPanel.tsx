@@ -151,6 +151,22 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
       <h2 className="panel-title">
         SESSIONS <span className="badge">{sessions.length}</span>
       </h2>
+      {pendingApprovals.length > 0 && (
+        <div className="approval-banner">
+          {pendingApprovals.map((a) => (
+            <div key={a.id} className="approval-banner-item">
+              <div className="approval-banner-info">
+                <span className="approval-banner-tool">{a.toolName}</span>
+                <code className="approval-banner-summary">{summarizeApproval(a.toolName, a.toolInput)}</code>
+              </div>
+              <div className="approval-banner-actions">
+                <button className="approval-banner-btn deny" onClick={() => onResolveApproval(a.id, "deny")}>DENY</button>
+                <button className="approval-banner-btn allow" onClick={() => onResolveApproval(a.id, "allow")}>ALLOW</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {pendingQuestions.length > 0 && (
         <div className="question-section">
           {pendingQuestions.map((q) => (

@@ -74,6 +74,9 @@ function App() {
   const [toolStatuses, setToolStatuses] = useState<Record<string, ToolStatus>>({});
   const [notchInfo, setNotchInfo] = useState<{ has_notch: boolean; notch_width: number; notch_height: number; pill_width: number } | null>(null);
 
+  // Inline approval count for use in effects (avoids TDZ with later-declared derived values)
+  const approvalNeededCount = pendingStates.filter(ps => ps.pending === "needs_approval").length + pendingApprovals.length;
+
   const lastNotifTs = useRef(0);
   const prevAlive = useRef<Map<string, boolean>>(new Map());
   const prevPendingIds = useRef<Set<string>>(new Set());
@@ -84,6 +87,7 @@ function App() {
   const isHovering = useRef(false);
   const autoCollapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const islandRef = useRef<HTMLDivElement>(null);
+  const lastAutoExpandApprovalId = useRef("");
 
   // Fetch notch info once on mount
   useEffect(() => {
@@ -115,7 +119,8 @@ function App() {
   useEffect(() => {
     invoke("set_skip_dangerous", { enabled: true }).catch(() => {});
     invoke("set_auto_approve", { enabled: true }).catch(() => {});
-    // Re-center window after all macOS setup completes
+    // Re-apply transparency + position on every page load (including reload)
+    invoke("ensure_transparency").catch(() => {});
     invoke("center_window").catch(() => {});
   }, []);
 
@@ -127,7 +132,8 @@ function App() {
   const computeIslandSize = () => {
     let w: number, h: number;
     if (mode === "pill") {
-      w = notchInfo?.has_notch ? notchInfo.notch_width + 60 : 240;
+      const aliveCount = sessions.filter((s) => s.isAlive).length;
+      w = notchInfo?.has_notch ? notchInfo.notch_width + 60 : Math.max(240, Math.min(360, 190 + aliveCount * 34));
       h = notchInfo?.has_notch ? notchInfo.notch_height + 25 : 36;
     } else if (mode === "notification") {
       w = Math.max(380, notchInfo?.has_notch ? notchInfo.notch_width + 80 : 380);
@@ -186,6 +192,24 @@ function App() {
     return () => document.documentElement.removeEventListener("mouseleave", onWindowMouseLeave);
   }, []);
 
+  // ── Safety: collapse on window blur ──
+  // After JUMP (or any action that activates another app), the Tauri window
+  // loses focus.  macOS stops delivering mouse-tracking events to unfocused
+  // transparent windows, so onMouseLeave never fires.  Collapse after a short
+  // grace period when focus is still gone.
+  useEffect(() => {
+    const onBlur = () => {
+      setTimeout(() => {
+        if (!document.hasFocus() && Date.now() >= pinFullUntil.current) {
+          isHovering.current = false;
+          setMode("pill");
+        }
+      }, 600);
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, []);
+
   // ── Safety: periodic stuck-full detection ──
   // If the window has been in full mode for 15s without hover, force collapse.
   // This guards against any edge case where both mouseLeave handlers fail.
@@ -210,6 +234,27 @@ function App() {
     }, 5000);
     return () => clearInterval(check);
   }, []);
+
+  // ── Prevent notification auto-collapse while approval pending ──
+  useEffect(() => {
+    if (mode === "notification" && approvalNeededCount > 0) {
+      if (autoCollapseTimer.current) {
+        clearTimeout(autoCollapseTimer.current);
+        autoCollapseTimer.current = null;
+      }
+    }
+  }, [mode, approvalNeededCount]);
+
+  // ── Auto-expand to full mode when new approval arrives ──
+  useEffect(() => {
+    if (pendingApprovals.length > 0 && pendingApprovals[0].id !== lastAutoExpandApprovalId.current) {
+      lastAutoExpandApprovalId.current = pendingApprovals[0].id;
+      clearTimers();
+      pinFullUntil.current = Date.now() + 30000;
+      setMode("full");
+      setTab("sessions");
+    }
+  }, [pendingApprovals]);
 
   const autoNotify = useCallback((sessionKey?: string) => {
     if (Date.now() - launchTime.current < 8000) return;
@@ -387,6 +432,11 @@ function App() {
         message: behavior === "deny" ? "Denied from Cat Monitor" : null,
       });
       refresh();
+      // Auto-collapse after approval resolved
+      pinFullUntil.current = 0;
+      setTimeout(() => {
+        if (!isHovering.current) setMode("pill");
+      }, 1500);
     } catch (err) {
       console.error("Failed to resolve approval:", err);
     }
@@ -516,6 +566,8 @@ function App() {
                 ? `${pendingApprovals[0].toolName}: ${pendingApprovals[0].toolName === "Bash"
                     ? String(pendingApprovals[0].toolInput?.command ?? "").slice(0, 50)
                     : String(pendingApprovals[0].toolInput?.file_path ?? pendingApprovals[0].toolName).slice(0, 50)}`
+                : hasPendingApproval
+                ? `${needsAttention[0].tool_name}: ${needsAttention[0].message.slice(0, 50)}`
                 : hasPendingQuestion
                 ? pendingQuestions[0].header || pendingQuestions[0].question.slice(0, 50)
                 : toast || lastNotifText || "Notification"}
@@ -526,12 +578,18 @@ function App() {
                   const a = pendingApprovals[0];
                   await invoke("resolve_approval", { id: a.id, behavior: "deny", message: "Denied from notification" }).catch(() => {});
                   refresh();
+                  setTimeout(() => { if (!isHovering.current) setMode("pill"); }, 1000);
                 }}>DENY</button>
                 <button className="notif-btn allow" onClick={async () => {
                   const a = pendingApprovals[0];
                   await invoke("resolve_approval", { id: a.id, behavior: "allow", message: null }).catch(() => {});
                   refresh();
+                  setTimeout(() => { if (!isHovering.current) setMode("pill"); }, 1000);
                 }}>ALLOW</button>
+              </div>
+            ) : hasPendingApproval ? (
+              <div className="notif-actions">
+                <PillSpinner />
               </div>
             ) : hasPendingQuestion ? (
               <button className="notif-jump question" onClick={() => {

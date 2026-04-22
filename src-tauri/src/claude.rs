@@ -1226,24 +1226,100 @@ fn detect_ask_user_question(
 
 // ── Jump to Terminal ──
 
+/// Find the TTY device path for a PID.
+/// Primary: `lsof -p <pid> -a -d 0` (precise fd-based lookup).
+/// Fallback: `ps -p <pid> -o tty=` (controlling terminal, works even after sleep/wake).
+fn find_tty_for_pid(pid: u32) -> Option<String> {
+    // Primary: lsof
+    if let Ok(output) = std::process::Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-a", "-d", "0"])
+        .output()
+    {
+        let lsof_out = String::from_utf8_lossy(&output.stdout);
+        if let Some(tty) = lsof_out
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                parts.last().map(|s| s.to_string())
+            })
+            .find(|s| s.starts_with("/dev/ttys"))
+        {
+            return Some(tty);
+        }
+        eprintln!("[jump] lsof found no /dev/ttys for pid={}, trying ps fallback", pid);
+    } else {
+        eprintln!("[jump] lsof failed for pid={}, trying ps fallback", pid);
+    }
+
+    // Fallback: ps -o tty=
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "tty="])
+        .output()
+    {
+        let tty_short = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if tty_short.starts_with('s') {
+            // ps returns e.g. "s003" — convert to "/dev/ttys003"
+            let full = format!("/dev/tty{}", tty_short);
+            eprintln!("[jump] ps fallback found tty={} for pid={}", full, pid);
+            return Some(full);
+        }
+    }
+
+    eprintln!("[jump] no TTY found for pid={}", pid);
+    None
+}
+
+/// Activate a JetBrains IDE and open its Terminal tool window (⌥F12).
+/// Uses CGEvent (Core Graphics) to send the keystroke so macOS attributes the
+/// Accessibility permission check to Claude Cat Monitor.app, not osascript.
+fn jetbrains_activate_terminal(app_name: &str) {
+    // 1. Activate the IDE via AppleScript (this doesn't need Accessibility)
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &format!(r#"tell application "{}" to activate"#, app_name)])
+        .output();
+
+    // 2. Brief delay for the app to come to front
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 3. Send ⌥F12 via CGEvent (key code 111 = F12, with Option modifier)
+    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, EventField};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("[jump] CGEventSource creation failed for {}", app_name);
+            return;
+        }
+    };
+
+    let f12_keycode: CGKeyCode = 111; // F12
+
+    // Key down with Option modifier
+    if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), f12_keycode, true) {
+        event.set_flags(CGEventFlags::CGEventFlagAlternate);
+        event.post(core_graphics::event::CGEventTapLocation::HID);
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    // Key up
+    if let Ok(event) = CGEvent::new_keyboard_event(source, f12_keycode, false) {
+        event.set_flags(CGEventFlags::CGEventFlagAlternate);
+        event.post(core_graphics::event::CGEventTapLocation::HID);
+    }
+
+    eprintln!("[jump] sent ⌥F12 via CGEvent to {}", app_name);
+}
+
 pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Find the TTY for this PID
-    let output = std::process::Command::new("lsof")
-        .args(["-p", &pid.to_string(), "-a", "-d", "0"])
-        .output()?;
-
-    let lsof_out = String::from_utf8_lossy(&output.stdout);
-    let tty = lsof_out
-        .lines()
-        .skip(1) // header
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.last().map(|s| s.to_string())
-        })
-        .find(|s| s.starts_with("/dev/ttys"));
+    let tty = find_tty_for_pid(pid);
 
     // 2. Detect which terminal app is running
     let terminal_app = detect_terminal_for_pid(pid);
+    eprintln!("[jump] pid={} tty={:?} terminal={}", pid, tty, terminal_app);
 
     // 3. Use AppleScript to activate the correct terminal window
     if let Some(tty_path) = tty {
@@ -1266,9 +1342,14 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
                      end tell"#,
                     tty_path
                 );
-                let _ = std::process::Command::new("osascript")
+                let result = std::process::Command::new("osascript")
                     .args(["-e", &script])
                     .output();
+                if let Ok(o) = &result {
+                    if !o.status.success() {
+                        eprintln!("[jump] iTerm2 AppleScript failed: {}", String::from_utf8_lossy(&o.stderr));
+                    }
+                }
             }
             "Terminal" => {
                 let script = format!(
@@ -1286,19 +1367,23 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
                      end tell"#,
                     tty_path
                 );
-                let _ = std::process::Command::new("osascript")
+                let result = std::process::Command::new("osascript")
                     .args(["-e", &script])
                     .output();
+                if let Ok(o) = &result {
+                    if !o.status.success() {
+                        eprintln!("[jump] Terminal AppleScript failed: {}", String::from_utf8_lossy(&o.stderr));
+                    }
+                }
             }
             "Ghostty" => {
                 ghostty_raise_window(Some(&tty_path));
             }
             "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", &format!(r#"tell application "{}" to activate"#, terminal_app)])
-                    .output();
+                jetbrains_activate_terminal(&terminal_app);
             }
             _ => {
+                eprintln!("[jump] unknown terminal '{}', generic activate", terminal_app);
                 let _ = std::process::Command::new("osascript")
                     .args([
                         "-e",
@@ -1308,8 +1393,12 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
+        eprintln!("[jump] no TTY — fallback to generic activate for '{}'", terminal_app);
         match terminal_app.as_str() {
             "Ghostty" => ghostty_raise_window(None),
+            "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
+                jetbrains_activate_terminal(&terminal_app);
+            }
             _ => {
                 let _ = std::process::Command::new("osascript")
                     .args([
@@ -1359,21 +1448,9 @@ end tell"#;
 }
 
 pub fn select_option(pid: u32, down_presses: u32) -> Result<String, Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("lsof")
-        .args(["-p", &pid.to_string(), "-a", "-d", "0"])
-        .output()?;
-
-    let lsof_out = String::from_utf8_lossy(&output.stdout);
-    let tty = lsof_out
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.last().map(|s| s.to_string())
-        })
-        .find(|s| s.starts_with("/dev/ttys"));
-
+    let tty = find_tty_for_pid(pid);
     let terminal_app = detect_terminal_for_pid(pid);
+    eprintln!("[select_option] pid={} tty={:?} terminal={}", pid, tty, terminal_app);
 
     if let Some(ref tty_path) = tty {
         match terminal_app.as_str() {
@@ -1446,21 +1523,9 @@ pub fn select_option(pid: u32, down_presses: u32) -> Result<String, Box<dyn std:
 /// Multi-select: navigate through options, Space to toggle selected ones, Enter to confirm.
 /// `selected_indices` are 0-indexed positions that should be toggled on.
 pub fn select_multi_option(pid: u32, selected_indices: &[u32], _total_options: u32) -> Result<String, Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("lsof")
-        .args(["-p", &pid.to_string(), "-a", "-d", "0"])
-        .output()?;
-
-    let lsof_out = String::from_utf8_lossy(&output.stdout);
-    let tty = lsof_out
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.last().map(|s| s.to_string())
-        })
-        .find(|s| s.starts_with("/dev/ttys"));
-
+    let tty = find_tty_for_pid(pid);
     let terminal_app = detect_terminal_for_pid(pid);
+    eprintln!("[select_multi] pid={} tty={:?} terminal={}", pid, tty, terminal_app);
 
     if let Some(ref tty_path) = tty {
         match terminal_app.as_str() {
@@ -1534,21 +1599,9 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
     set_clipboard_pbcopy(&text)?;
 
     // 2. Find TTY and detect terminal
-    let output = std::process::Command::new("lsof")
-        .args(["-p", &pid.to_string(), "-a", "-d", "0"])
-        .output()?;
-
-    let lsof_out = String::from_utf8_lossy(&output.stdout);
-    let tty = lsof_out
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.last().map(|s| s.to_string())
-        })
-        .find(|s| s.starts_with("/dev/ttys"));
-
+    let tty = find_tty_for_pid(pid);
     let terminal_app = detect_terminal_for_pid(pid);
+    eprintln!("[copy_and_jump] pid={} tty={:?} terminal={}", pid, tty, terminal_app);
 
     // 3. Jump to the terminal window (reuse jump logic)
     if let Some(ref tty_path) = tty {
@@ -1615,9 +1668,7 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
                 return Ok("auto_sent".to_string());
             }
             "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", &format!(r#"tell application "{}" to activate"#, terminal_app)])
-                    .output();
+                jetbrains_activate_terminal(&terminal_app);
                 return Ok("clipboard_only".to_string());
             }
             _ => {
@@ -1631,8 +1682,12 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
             }
         }
     } else {
+        eprintln!("[copy_and_jump] no TTY — fallback for '{}'", terminal_app);
         match terminal_app.as_str() {
             "Ghostty" => ghostty_raise_window(None),
+            "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
+                jetbrains_activate_terminal(&terminal_app);
+            }
             _ => {
                 let _ = std::process::Command::new("osascript")
                     .args([

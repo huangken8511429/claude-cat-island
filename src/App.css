@@ -98,8 +98,8 @@ body {
 /* ── Pill mode ── */
 .island-pill {
   cursor: pointer;
-  border-radius: 0;
-  box-shadow: none;
+  border-radius: 18px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
 }
 
 /* Notch pill: Dynamic Island shape — flush top, rounded bottom */
@@ -238,11 +238,19 @@ body {
   gap: 8px;
 }
 
-.pill-left,
+.pill-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 .pill-right {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .pill-notch .pill-left {
@@ -1036,6 +1044,92 @@ body {
   width: 100%;
   text-align: center;
   padding-top: 2px;
+}
+
+/* ── Approval Banner (top of sessions panel) ── */
+
+.approval-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.approval-banner-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: var(--radius-sm);
+  animation: attention-pulse 2s ease-in-out infinite;
+}
+
+.approval-banner-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.approval-banner-tool {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--status-attention);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.approval-banner-summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  word-break: break-all;
+  background: none;
+  padding: 0;
+}
+
+.approval-banner-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.approval-banner-btn {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0.06em;
+}
+
+.approval-banner-btn.deny {
+  color: var(--text-secondary);
+  border-color: var(--border-subtle);
+  background: transparent;
+}
+
+.approval-banner-btn.deny:hover {
+  color: var(--status-error);
+  border-color: var(--status-error);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.approval-banner-btn.allow {
+  color: #000;
+  background: var(--status-active);
+  border-color: var(--status-active);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.3);
+}
+
+.approval-banner-btn.allow:hover {
+  background: #2dd38f;
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.5);
 }
 
 /* ── Inline Approval ── */

@@ -171,23 +171,33 @@ fn detect_notch_for_name(target: Option<&str>) -> NotchInfo {
     unsafe {
         let screens: cocoa::base::id = msg_send![class!(NSScreen), screens];
         let count: usize = msg_send![screens, count];
+        eprintln!("[notch-diag] detect_notch_for_name target={:?} screen_count={}", target, count);
         for i in 0..count {
             let screen: cocoa::base::id = msg_send![screens, objectAtIndex: i];
+            let screen_name = nsscreen_localized_name(screen);
             let matches = match target {
-                Some(t) => nsscreen_localized_name(screen).as_deref() == Some(t),
+                Some(t) => screen_name.as_deref() == Some(t),
                 None => i == 0,
             };
+            eprintln!("[notch-diag]   screen[{}] name={:?} matches={}", i, screen_name, matches);
             if !matches { continue; }
 
             let insets: NSRect = msg_send![screen, safeAreaInsets];
             let top_inset = insets.origin.x;
+            let frame: NSRect = msg_send![screen, frame];
+            eprintln!("[notch-diag] screen={} frame={}x{} safeAreaInsets(top={}, left={}, bottom={}, right={})",
+                i, frame.size.width, frame.size.height,
+                insets.origin.x, insets.origin.y, insets.size.width, insets.size.height);
             if top_inset > 0.0 {
-                let frame: NSRect = msg_send![screen, frame];
                 let aux_left: NSRect = msg_send![screen, auxiliaryTopLeftArea];
                 let aux_right: NSRect = msg_send![screen, auxiliaryTopRightArea];
                 let notch_width = frame.size.width - aux_left.size.width - aux_right.size.width;
                 let notch_height = top_inset;
                 let pill_width = (notch_width + 120.0).max(440.0);
+                eprintln!("[notch-diag] HAS NOTCH: aux_left={}x{} aux_right={}x{} notch_width={} notch_height={} pill_width={}",
+                    aux_left.size.width, aux_left.size.height,
+                    aux_right.size.width, aux_right.size.height,
+                    notch_width, notch_height, pill_width);
                 return NotchInfo { has_notch: true, notch_width, notch_height, pill_width };
             }
             break;
@@ -248,13 +258,50 @@ fn pick_monitor(window: &WebviewWindow, settings: &settings::AppSettings) -> Opt
     window.primary_monitor().ok().flatten().or_else(|| monitors.first().cloned())
 }
 
+// Match Tauri Monitor to NSScreen by physical position, since
+// Tauri monitor names ("Monitor #41039") don't match NSScreen
+// localizedNames ("Built-in Retina Display").
+#[cfg(target_os = "macos")]
+fn detect_notch_for_monitor(monitor: &Monitor) -> NotchInfo {
+    use objc::{msg_send, sel, sel_impl, class};
+    use cocoa::foundation::NSRect;
+
+    let mon_pos = monitor.position();
+    let scale = monitor.scale_factor();
+    let logical_x = mon_pos.x as f64 / scale;
+    let logical_y = mon_pos.y as f64 / scale;
+
+    unsafe {
+        let screens: cocoa::base::id = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        for i in 0..count {
+            let screen: cocoa::base::id = msg_send![screens, objectAtIndex: i];
+            let frame: NSRect = msg_send![screen, frame];
+            // NSScreen uses bottom-left origin; Tauri uses top-left.
+            // Compare X and approximate match (within 2pt tolerance).
+            if (frame.origin.x - logical_x).abs() < 2.0 {
+                eprintln!("[position-diag] matched NSScreen[{}] by position", i);
+                return detect_notch_for_nsscreen(screen);
+            }
+        }
+    }
+    detect_notch_for_name(monitor.name().map(|s| s.as_str()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_notch_for_monitor(monitor: &Monitor) -> NotchInfo {
+    detect_notch_for_name(monitor.name().map(|s| s.as_str()))
+}
+
 fn position_on_monitor(window: &WebviewWindow, monitor: &Monitor) -> Result<(), String> {
-    let notch = detect_notch_for_name(monitor.name().map(|s| s.as_str()));
+    let notch = detect_notch_for_monitor(monitor);
     let screen = monitor.size();
     let mon_pos = monitor.position();
     let scale = monitor.scale_factor();
     let logical_w = if notch.has_notch { notch.pill_width } else { 440.0 };
     let logical_h = 600.0;
+    eprintln!("[position-diag] monitor={:?} size={}x{} pos=({},{}) scale={} logical_w={} has_notch={}",
+        monitor.name(), screen.width, screen.height, mon_pos.x, mon_pos.y, scale, logical_w, notch.has_notch);
     let phys_w = (logical_w * scale) as u32;
     let phys_h = (logical_h * scale) as u32;
     let x = mon_pos.x + ((screen.width as f64 - phys_w as f64) / 2.0) as i32;
@@ -352,8 +399,56 @@ fn set_preferred_display(app: AppHandle, name: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn detect_notch_for_nsscreen(screen: cocoa::base::id) -> NotchInfo {
+    use objc::{msg_send, sel, sel_impl};
+    use cocoa::foundation::NSRect;
+
+    unsafe {
+        let name = nsscreen_localized_name(screen);
+        let insets: NSRect = msg_send![screen, safeAreaInsets];
+        let top_inset = insets.origin.x;
+        let frame: NSRect = msg_send![screen, frame];
+        eprintln!("[notch-diag] nsscreen name={:?} frame={}x{} safeAreaInsets(top={})",
+            name, frame.size.width, frame.size.height, top_inset);
+        if top_inset > 0.0 {
+            let aux_left: NSRect = msg_send![screen, auxiliaryTopLeftArea];
+            let aux_right: NSRect = msg_send![screen, auxiliaryTopRightArea];
+            let notch_width = frame.size.width - aux_left.size.width - aux_right.size.width;
+            let notch_height = top_inset;
+            let pill_width = (notch_width + 120.0).max(440.0);
+            eprintln!("[notch-diag] HAS NOTCH: notch_width={} notch_height={} pill_width={}",
+                notch_width, notch_height, pill_width);
+            return NotchInfo { has_notch: true, notch_width, notch_height, pill_width };
+        }
+    }
+    NotchInfo { has_notch: false, notch_width: 0.0, notch_height: 0.0, pill_width: 240.0 }
+}
+
+// Tauri Monitor::name() returns generic IDs like "Monitor #41039" that
+// don't match NSScreen::localizedName ("Built-in Retina Display").
+// Reading the NSScreen directly from the NSWindow bypasses this mismatch.
+#[cfg(target_os = "macos")]
+fn detect_notch_for_window(window: &WebviewWindow) -> NotchInfo {
+    use objc::{msg_send, sel, sel_impl};
+    unsafe {
+        let ns_win: cocoa::base::id = window.ns_window().unwrap() as cocoa::base::id;
+        let screen: cocoa::base::id = msg_send![ns_win, screen];
+        if !screen.is_null() {
+            return detect_notch_for_nsscreen(screen);
+        }
+    }
+    detect_notch()
+}
+
 #[tauri::command]
-fn get_notch_info() -> NotchInfo {
+fn get_notch_info(app: AppHandle) -> NotchInfo {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        {
+            return detect_notch_for_window(&window);
+        }
+    }
     detect_notch()
 }
 
@@ -430,6 +525,71 @@ fn resolve_approval(
     state.resolve(&id, ApprovalDecision { behavior, message })
 }
 
+/// Re-apply NSWindow + WKWebView transparency.
+/// On macOS Sequoia, WKWebView reverts to opaque after `location.reload()`.
+#[cfg(target_os = "macos")]
+fn reapply_transparency(window: &WebviewWindow) {
+    use cocoa::appkit::NSWindow;
+    use objc::{msg_send, sel, sel_impl, class};
+    unsafe {
+        let ns_win: cocoa::base::id = window.ns_window().unwrap() as cocoa::base::id;
+        ns_win.setLevel_(25);
+        let clear: cocoa::base::id = msg_send![class!(NSColor), clearColor];
+        ns_win.setBackgroundColor_(clear);
+        ns_win.setOpaque_(cocoa::base::NO);
+        ns_win.setHasShadow_(cocoa::base::NO);
+
+        let content_view: cocoa::base::id = ns_win.contentView();
+        force_views_transparent(content_view);
+    }
+}
+
+/// Find the WKWebView in the view hierarchy and disable its background drawing.
+/// Only touches WKWebView — other views are left alone to avoid crashes.
+#[cfg(target_os = "macos")]
+unsafe fn force_views_transparent(view: cocoa::base::id) {
+    use objc::{msg_send, sel, sel_impl, class};
+    use cocoa::foundation::NSString;
+
+    if view.is_null() { return; }
+
+    let cls: cocoa::base::id = msg_send![view, className];
+    if cls.is_null() { return; }
+    let name_ptr: *const i8 = msg_send![cls, UTF8String];
+    if name_ptr.is_null() { return; }
+    let class_name = std::ffi::CStr::from_ptr(name_ptr).to_string_lossy();
+
+    if class_name.contains("WKWebView") {
+        // KVC is the safest approach — works across macOS versions
+        let no_val: cocoa::base::id = msg_send![class!(NSNumber), numberWithBool: cocoa::base::NO];
+        let key = cocoa::foundation::NSString::alloc(cocoa::base::nil)
+            .init_str("drawsBackground");
+        let _: () = msg_send![view, setValue: no_val forKey: key];
+        eprintln!("[transparency] set drawsBackground=NO on {}", class_name);
+        return;
+    }
+
+    let subviews: cocoa::base::id = msg_send![view, subviews];
+    if subviews.is_null() { return; }
+    let count: usize = msg_send![subviews, count];
+    for i in 0..count {
+        let subview: cocoa::base::id = msg_send![subviews, objectAtIndex: i];
+        force_views_transparent(subview);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reapply_transparency(_window: &WebviewWindow) {}
+
+/// Frontend calls this on every page load to ensure transparency
+/// survives webview reload on macOS Sequoia.
+#[tauri::command]
+fn ensure_transparency(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        reapply_transparency(&window);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Start approval HTTP server
@@ -472,6 +632,7 @@ pub fn run() {
             get_notch_info,
             update_island_bounds,
             center_window,
+            ensure_transparency,
             list_displays,
             get_preferred_display,
             set_preferred_display,
@@ -516,6 +677,18 @@ pub fn run() {
                         "reload" => {
                             if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.eval("location.reload()");
+                                // On macOS Sequoia, webview reload can reset the
+                                // transparent background. Re-apply after the page loads.
+                                let app_clone = app.clone();
+                                std::thread::spawn(move || {
+                                    for delay_ms in [200u64, 500, 1000] {
+                                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                                        if let Some(win) = app_clone.get_webview_window("main") {
+                                            reapply_transparency(&win);
+                                        }
+                                    }
+                                    let _ = apply_preferred_display(&app_clone);
+                                });
                             }
                         }
                         "quit" => {
@@ -550,21 +723,7 @@ pub fn run() {
 
             // ── macOS adjustments first (these can shift the window) ──
             if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "macos")]
-                {
-                    use cocoa::appkit::NSWindow;
-                    use objc::{msg_send, sel, sel_impl, class};
-                    let ns_win: cocoa::base::id = window.ns_window().unwrap() as cocoa::base::id;
-                    unsafe {
-                        ns_win.setLevel_(25);
-                        // Explicit transparency setup — required on macOS Sequoia (15+)
-                        // where Tauri's `transparent: true` alone is insufficient.
-                        let clear: cocoa::base::id = msg_send![class!(NSColor), clearColor];
-                        ns_win.setBackgroundColor_(clear);
-                        ns_win.setOpaque_(cocoa::base::NO);
-                        ns_win.setHasShadow_(cocoa::base::NO);
-                    }
-                }
+                reapply_transparency(&window);
             }
 
             #[cfg(target_os = "macos")]
