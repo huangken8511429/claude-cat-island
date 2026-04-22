@@ -2,6 +2,7 @@ mod claude;
 mod approval;
 mod socket;
 mod settings;
+mod rules;
 
 use approval::{ApprovalDecision, ApprovalServer, PendingApproval};
 use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PendingQuestion, PermissionConfig, Prerequisites, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
@@ -642,6 +643,13 @@ pub fn run() {
             get_preferred_display,
             set_preferred_display,
             quit_app,
+            rules::get_approval_rules,
+            rules::add_approval_rule,
+            rules::update_approval_rule,
+            rules::delete_approval_rule,
+            rules::reorder_approval_rules,
+            rules::import_preset_rules,
+            rules::check_rule_match,
         ])
         .setup(move |app| {
             use tauri::tray::TrayIconBuilder;

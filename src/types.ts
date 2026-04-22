@@ -136,6 +136,31 @@ export interface PendingQuestion {
   toolUseId: string;
 }
 
+// ── Approval Rules Types ──
+
+export interface RuleConditions {
+  tool_name: string;
+  path_pattern?: string;
+  command_pattern?: string;
+}
+
+export interface ApprovalRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  conditions: RuleConditions;
+  action: "allow" | "deny";
+  priority: number;
+  created_at: string;
+}
+
+export interface RuleMatchResult {
+  matched: boolean;
+  rule_id: string | null;
+  rule_name: string | null;
+  action: "allow" | "deny" | null;
+}
+
 // ── Approval System Types ──
 
 /** Raw hook input from Claude Code PermissionRequest */
