@@ -1854,7 +1854,6 @@ fn append_hook(settings: &mut serde_json::Value, event: &str, hook: serde_json::
 
 /// Map a TERM_PROGRAM value to a human-readable terminal app name.
 /// Returns `None` for values like "tmux" that require further parent-chain tracing.
-#[allow(dead_code)]
 fn map_term_program_to_app(term_program: &str) -> Option<String> {
     match term_program {
         "iTerm.app" => Some("iTerm2".to_string()),
@@ -1885,7 +1884,6 @@ fn map_term_program_to_app(term_program: &str) -> Option<String> {
 /// Format: [argc: i32][exec_path\0][NULLs...][argv0\0][argv1\0]...[NULLs...][env0=val0\0][env1=val1\0]...
 ///
 /// Returns the value of `TERM_PROGRAM` if found.
-#[allow(dead_code)]
 fn parse_term_program_from_procargs2(buf: &[u8]) -> Option<String> {
     if buf.len() < 4 {
         return None;
@@ -1953,7 +1951,6 @@ fn parse_term_program_from_procargs2(buf: &[u8]) -> Option<String> {
 ///
 /// Primary: macOS `sysctl(CTL_KERN, KERN_PROCARGS2)` — direct kernel read, no subprocess.
 /// Fallback: `ps eww -p <pid>` — shell-based, works when sysctl is restricted.
-#[allow(dead_code)]
 fn read_term_program_for_pid(pid: u32) -> Option<String> {
     // Primary: sysctl KERN_PROCARGS2
     if let Some(value) = read_term_program_sysctl(pid) {
@@ -1972,7 +1969,6 @@ fn read_term_program_for_pid(pid: u32) -> Option<String> {
 }
 
 /// Read TERM_PROGRAM via sysctl(CTL_KERN, KERN_PROCARGS2, pid).
-#[allow(dead_code)]
 fn read_term_program_sysctl(pid: u32) -> Option<String> {
     use std::os::raw::c_int;
 
@@ -2042,7 +2038,6 @@ fn read_term_program_sysctl(pid: u32) -> Option<String> {
 }
 
 /// Read TERM_PROGRAM via `ps eww -p <pid>` fallback.
-#[allow(dead_code)]
 fn read_term_program_ps(pid: u32) -> Option<String> {
     let output = std::process::Command::new("ps")
         .args(["eww", "-p", &pid.to_string()])
@@ -2065,8 +2060,32 @@ fn read_term_program_ps(pid: u32) -> Option<String> {
 }
 
 fn detect_terminal_for_pid(pid: u32) -> String {
-    // Strategy: PID → find shell on same TTY → trace parent chain up to terminal app
-    // The chain is typically: terminal → login → zsh → node(claude)
+    // === Layer 1: TERM_PROGRAM environment variable (fast, no shell-out for sysctl path) ===
+    if let Some(term_program) = read_term_program_for_pid(pid) {
+        if let Some(app) = map_term_program_to_app(&term_program) {
+            // Special case: "JetBrains" is too generic — fall through to Layer 2
+            // so parent-chain tracing can distinguish IntelliJ IDEA / WebStorm / PyCharm.
+            if app == "JetBrains" {
+                eprintln!(
+                    "[detect] layer 1 (TERM_PROGRAM): found {:?} but too generic, trying layer 2",
+                    app
+                );
+            } else {
+                eprintln!("[detect] layer 1 (TERM_PROGRAM): found {:?}", app);
+                return app;
+            }
+        } else {
+            eprintln!(
+                "[detect] layer 1 (TERM_PROGRAM): value {:?} unmapped, falling through",
+                term_program
+            );
+        }
+    } else {
+        eprintln!("[detect] layer 1 (TERM_PROGRAM): miss");
+    }
+
+    // === Layer 2: lsof + TTY + trace_to_terminal() parent chain ===
+    eprintln!("[detect] layer 2 (lsof + parent chain): starting for pid={}", pid);
     let output = std::process::Command::new("lsof")
         .args(["-p", &pid.to_string(), "-a", "-d", "0"])
         .output();
@@ -2091,6 +2110,7 @@ fn detect_terminal_for_pid(pid: u32) -> String {
                         if let Ok(child_pid) = parts[1].parse::<u32>() {
                             // Trace up parent chain looking for a terminal app
                             if let Some(app) = trace_to_terminal(child_pid) {
+                                eprintln!("[detect] layer 2 (lsof + parent chain): found {:?}", app);
                                 return app;
                             }
                         }
@@ -2099,9 +2119,13 @@ fn detect_terminal_for_pid(pid: u32) -> String {
             }
         }
     }
+    eprintln!("[detect] layer 2 (lsof + parent chain): miss");
 
-    // Fallback: detect any running terminal
-    detect_terminal_app()
+    // === Layer 3: detect_terminal_app() full system scan ===
+    eprintln!("[detect] layer 3 (system scan): starting");
+    let app = detect_terminal_app();
+    eprintln!("[detect] layer 3 (system scan): result {:?}", app);
+    app
 }
 
 /// Trace parent process chain up to find a terminal app.
