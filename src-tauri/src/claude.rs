@@ -1270,26 +1270,44 @@ fn find_tty_for_pid(pid: u32) -> Option<String> {
     None
 }
 
+// ── Accessibility Permission Check ──
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
+/// CGEvent and System Events keystrokes silently fail without Accessibility permission.
+/// Pre-checking lets us skip those code paths and fall back to activate-only.
+fn is_accessibility_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
 /// Activate a JetBrains IDE and open its Terminal tool window (⌥F12).
 /// Uses CGEvent (Core Graphics) to send the keystroke so macOS attributes the
 /// Accessibility permission check to Claude Cat Monitor.app, not osascript.
 fn jetbrains_activate_terminal(app_name: &str) {
-    // 1. Activate the IDE via AppleScript (this doesn't need Accessibility)
+    // Activate the IDE via AppleScript (this doesn't need Accessibility)
     let _ = std::process::Command::new("osascript")
         .args(["-e", &format!(r#"tell application "{}" to activate"#, app_name)])
         .output();
 
-    // 2. Brief delay for the app to come to front
+    if !is_accessibility_trusted() {
+        eprintln!("[jump] no Accessibility permission, falling back to activate-only for {}", app_name);
+        return;
+    }
+
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // 3. Send ⌥F12 via CGEvent (key code 111 = F12, with Option modifier)
-    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, EventField};
+    // Primary: send ⌥F12 via CGEvent (key code 111 = F12, with Option modifier)
+    use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let source = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
         Ok(s) => s,
         Err(_) => {
-            eprintln!("[jump] CGEventSource creation failed for {}", app_name);
+            eprintln!("[jump] CGEventSource creation failed for {}, trying menu item fallback", app_name);
+            jetbrains_menu_item_fallback(app_name);
             return;
         }
     };
@@ -1311,6 +1329,56 @@ fn jetbrains_activate_terminal(app_name: &str) {
     }
 
     eprintln!("[jump] sent ⌥F12 via CGEvent to {}", app_name);
+}
+
+/// Secondary fallback: click View → Terminal menu item via System Events.
+/// Also requires Accessibility (caller must check before calling).
+fn jetbrains_menu_item_fallback(app_name: &str) {
+    let script = format!(
+        r#"tell application "System Events"
+             tell process "{}"
+                 click menu item "Terminal" of menu "View" of menu bar 1
+             end tell
+         end tell"#,
+        app_name
+    );
+    let result = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output();
+    match result {
+        Ok(o) if o.status.success() => {
+            eprintln!("[jump] opened Terminal via menu item for {}", app_name);
+        }
+        Ok(o) => {
+            eprintln!("[jump] menu item fallback failed for {}: {}", app_name, String::from_utf8_lossy(&o.stderr));
+        }
+        Err(e) => {
+            eprintln!("[jump] menu item fallback error for {}: {}", app_name, e);
+        }
+    }
+}
+
+/// Activate VSCode and toggle its integrated terminal panel via Ctrl+`.
+/// With Accessibility: activate + send Ctrl+` to ensure terminal pane has focus.
+/// Without Accessibility: activate only (terminal likely already has focus from user's last interaction).
+fn vscode_activate_and_focus_terminal() {
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", r#"tell application "Visual Studio Code" to activate"#])
+        .output();
+
+    if !is_accessibility_trusted() {
+        eprintln!("[jump] no Accessibility permission, falling back to activate-only for Visual Studio Code");
+        return;
+    }
+
+    // Send Ctrl+` (backtick = key code 50) to toggle terminal panel
+    let script = r#"delay 0.15
+tell application "System Events"
+    key code 50 using control down
+end tell"#;
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output();
 }
 
 pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
@@ -1382,6 +1450,9 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
             "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
                 jetbrains_activate_terminal(&terminal_app);
             }
+            "Visual Studio Code" => {
+                vscode_activate_and_focus_terminal();
+            }
             _ => {
                 eprintln!("[jump] unknown terminal '{}', generic activate", terminal_app);
                 let _ = std::process::Command::new("osascript")
@@ -1398,6 +1469,11 @@ pub fn jump_to_session(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
             "Ghostty" => ghostty_raise_window(None),
             "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
                 jetbrains_activate_terminal(&terminal_app);
+            }
+            "Visual Studio Code" => {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", r#"tell application "Visual Studio Code" to activate"#])
+                    .output();
             }
             _ => {
                 let _ = std::process::Command::new("osascript")
@@ -1431,12 +1507,19 @@ fn set_clipboard_pbcopy(text: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Activate VSCode and send Cmd+V + Return via System Events.
-/// Requires Accessibility permission granted to Claude Cat Monitor.
 /// Assumes the active terminal pane already holds keyboard focus (which is
 /// normally true because Claude was just reading input there).
 fn vscode_paste_and_enter() {
-    let script = r#"tell application "Visual Studio Code" to activate
-delay 0.15
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", r#"tell application "Visual Studio Code" to activate"#])
+        .output();
+
+    if !is_accessibility_trusted() {
+        eprintln!("[jump] no Accessibility permission, falling back to activate-only for Visual Studio Code");
+        return;
+    }
+
+    let script = r#"delay 0.15
 tell application "System Events"
     keystroke "v" using command down
     delay 0.08
@@ -1687,6 +1770,10 @@ pub fn copy_and_jump(pid: u32, text: String) -> Result<String, Box<dyn std::erro
             "Ghostty" => ghostty_raise_window(None),
             "IntelliJ IDEA" | "WebStorm" | "PyCharm" => {
                 jetbrains_activate_terminal(&terminal_app);
+            }
+            "Visual Studio Code" => {
+                vscode_paste_and_enter();
+                return Ok("auto_sent".to_string());
             }
             _ => {
                 let _ = std::process::Command::new("osascript")
@@ -2277,6 +2364,14 @@ fn ghostty_raise_window(tty_path: Option<&str>) {
     let window_idx = tty_path.and_then(ghostty_tty_to_window_index);
 
     if let Some(idx) = window_idx {
+        if !is_accessibility_trusted() {
+            eprintln!("[jump] no Accessibility permission, falling back to activate-only for Ghostty");
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", r#"tell application "Ghostty" to activate"#])
+                .output();
+            return;
+        }
+
         let script = format!(
             r#"tell application "Ghostty" to activate
              delay 0.1
