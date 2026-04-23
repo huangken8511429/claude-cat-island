@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 // Window API no longer needed — window is fixed-size, Rust handles click-through
-import { CatState, ClaudeSession, TokenStats, SkillInfo, PermissionConfig, LiveStats, SessionPendingState, PendingApproval, PendingQuestion, SessionActivityInfo, Prerequisites } from "./types";
+import { CatState, ClaudeSession, TokenStats, SkillInfo, PermissionConfig, LiveStats, SessionPendingState, PendingApproval, PendingQuestion, SessionActivityInfo, Prerequisites, ApprovalRule, RuleMatchResult } from "./types";
 import SessionPanel from "./components/SessionPanel";
 import TokenPanel from "./components/TokenPanel";
 import SkillPanel from "./components/SkillPanel";
@@ -65,6 +65,7 @@ function App() {
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
   const [activities, setActivities] = useState<Record<string, SessionActivityInfo>>({});
+  const [approvalRules, setApprovalRules] = useState<ApprovalRule[]>([]);
   const [inDetail, setInDetail] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [, setAudioReady] = useState(false);
@@ -83,6 +84,7 @@ function App() {
   const prevAlive = useRef<Map<string, boolean>>(new Map());
   const prevPendingIds = useRef<Set<string>>(new Set());
   const isFirstLoad = useRef(true);
+  const firstRunChecked = useRef(false);
   const failCount = useRef(0);
   const launchTime = useRef(Date.now());
   const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -117,10 +119,11 @@ function App() {
     return () => document.removeEventListener("click", unlock);
   }, []);
 
-  // ── Max permissions on startup ──
+  // ── Startup settings ──
   useEffect(() => {
     invoke("set_skip_dangerous", { enabled: true }).catch(() => {});
-    invoke("set_auto_approve", { enabled: true }).catch(() => {});
+    // NOTE: set_auto_approve removed — ruled by the Smart Auto-Approve rule engine.
+    // The flag file is managed explicitly via PermissionPanel toggles (FULL TRUST / CAREFUL).
     // Re-apply transparency + position on every page load (including reload)
     invoke("ensure_transparency").catch(() => {});
     invoke("center_window").catch(() => {});
@@ -426,11 +429,40 @@ function App() {
     }
   }, [error, autoNotify]);
 
+  const fetchApprovalRules = useCallback(async () => {
+    try {
+      const rules = await invoke<ApprovalRule[]>("get_approval_rules");
+      setApprovalRules(rules);
+    } catch {
+      // Backend may not have rules command yet — silently ignore
+    }
+  }, []);
+
   useEffect(() => {
     refresh();
+    fetchApprovalRules();
     const interval = setInterval(refresh, 3000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+    // Fetch rules less frequently (every 10s) since they rarely change
+    const rulesInterval = setInterval(fetchApprovalRules, 10000);
+    return () => { clearInterval(interval); clearInterval(rulesInterval); };
+  }, [refresh, fetchApprovalRules]);
+
+  // ── First-run: import safe_defaults if no rules and no auto-approve flag ──
+  useEffect(() => {
+    if (firstRunChecked.current) return;
+    // Wait until both permissions and approvalRules have been fetched
+    if (permissions === null) return;
+    firstRunChecked.current = true;
+
+    // Only import safe_defaults on first run:
+    // - No auto-approve flag file (user hasn't opted into FULL TRUST)
+    // - No existing rules (fresh install)
+    if (!permissions.autoApproveAll && approvalRules.length === 0) {
+      invoke("import_preset_rules", { preset: "safe_defaults" })
+        .then(() => fetchApprovalRules())
+        .catch((err) => console.error("Failed to import safe_defaults:", err));
+    }
+  }, [permissions, approvalRules, fetchApprovalRules]);
 
   // Real-time updates via Unix socket → Tauri event bridge.
   // Parses hook events to update per-session tool status instantly,
@@ -487,6 +519,87 @@ function App() {
   };
   const handleToggleAutoApprove = async (enabled: boolean) => {
     try { await invoke("set_auto_approve", { enabled }); await refresh(); } catch {}
+  };
+
+  const handleToggleRule = async (id: string, enabled: boolean) => {
+    try {
+      await invoke("update_approval_rule", { id, enabled });
+      await fetchApprovalRules();
+    } catch (err) {
+      console.error("Failed to toggle rule:", err);
+    }
+  };
+
+  const handleDeleteRule = async (id: string) => {
+    try {
+      await invoke("delete_approval_rule", { id });
+      await fetchApprovalRules();
+    } catch (err) {
+      console.error("Failed to delete rule:", err);
+    }
+  };
+
+  const handleUpdateRule = async (id: string, name: string, toolName: string, pathPattern: string | null, commandPattern: string | null, action: string) => {
+    try {
+      await invoke("update_approval_rule", {
+        id,
+        name,
+        toolName,
+        pathPattern: pathPattern || "",
+        commandPattern: commandPattern || "",
+        action,
+      });
+      await fetchApprovalRules();
+    } catch (err) {
+      console.error("Failed to update rule:", err);
+    }
+  };
+
+  const handleAddRule = async (name: string, toolName: string, pathPattern: string | null, commandPattern: string | null, action: string) => {
+    try {
+      await invoke("add_approval_rule", {
+        name,
+        toolName,
+        pathPattern,
+        commandPattern,
+        action,
+      });
+      await fetchApprovalRules();
+    } catch (err) {
+      console.error("Failed to add rule:", err);
+    }
+  };
+
+  const handleReorderRules = async (ids: string[]) => {
+    try {
+      await invoke("reorder_approval_rules", { ids });
+      await fetchApprovalRules();
+    } catch (err) {
+      console.error("Failed to reorder rules:", err);
+    }
+  };
+
+  const handleCheckRuleMatch = async (toolName: string, toolInput: string, cwd: string | null): Promise<RuleMatchResult> => {
+    try {
+      const parsedInput = JSON.parse(toolInput);
+      return await invoke<RuleMatchResult>("check_rule_match", {
+        toolName,
+        toolInput: parsedInput,
+        cwd,
+      });
+    } catch (err) {
+      console.error("Failed to check rule match:", err);
+      return { matched: false, rule_id: null, rule_name: null, action: null };
+    }
+  };
+
+  const handleImportPreset = async (preset: string) => {
+    try {
+      await invoke("import_preset_rules", { preset });
+      await fetchApprovalRules();
+    } catch (err) {
+      console.error("Failed to import preset:", err);
+    }
   };
 
   const aliveSessions = sessions.filter((s) => s.isAlive);
@@ -743,8 +856,17 @@ function App() {
               {tab === "skills" && <SkillPanel skills={skills} onDetailChange={setInDetail} />}
               {tab === "permissions" && (
                 <PermissionPanel permissions={permissions}
+                  approvalRules={approvalRules}
                   onToggleSkipDangerous={handleToggleSkipDangerous}
-                  onToggleAutoApprove={handleToggleAutoApprove} />
+                  onToggleAutoApprove={handleToggleAutoApprove}
+                  onToggleRule={handleToggleRule}
+                  onDeleteRule={handleDeleteRule}
+                  onRefreshRules={fetchApprovalRules}
+                  onAddRule={handleAddRule}
+                  onUpdateRule={handleUpdateRule}
+                  onReorderRules={handleReorderRules}
+                  onCheckRuleMatch={handleCheckRuleMatch}
+                  onImportPreset={handleImportPreset} />
               )}
             </main>
           </div>

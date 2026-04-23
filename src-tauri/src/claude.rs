@@ -7,7 +7,7 @@ fn claude_dir() -> PathBuf {
     PathBuf::from(home).join(".claude")
 }
 
-fn monitor_dir() -> PathBuf {
+pub(crate) fn monitor_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".claude-cat-monitor")
 }
