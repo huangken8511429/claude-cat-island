@@ -123,7 +123,9 @@ fn find_transcript_path(session_id: &str, cwd: &str) -> Option<PathBuf> {
 
         // Exact match is stale — likely compacted. Look for the real transcript.
         // Exclude files that belong to other alive sessions to avoid cross-contamination.
-        let other_alive: std::collections::HashSet<String> = alive_session_ids()
+        let all_alive = alive_session_ids();
+        let session_is_alive = all_alive.contains(session_id);
+        let other_alive: std::collections::HashSet<String> = all_alive
             .into_iter()
             .filter(|id| id != session_id)
             .collect();
@@ -152,8 +154,11 @@ fn find_transcript_path(session_id: &str, cwd: &str) -> Option<PathBuf> {
                 }
             }
             if let Some((path, mod_time)) = newest {
-                // Only use the newer file if it was modified recently (within 5 min)
-                if mod_time.elapsed().map_or(true, |d| d.as_secs() < 300) {
+                // For alive sessions, always use the newest file (it's the
+                // compacted transcript regardless of idle time).  For dead
+                // sessions, only use it if modified recently (within 5 min) to
+                // avoid picking up a different dead session's file.
+                if session_is_alive || mod_time.elapsed().map_or(true, |d| d.as_secs() < 300) {
                     return Some(path);
                 }
             }
