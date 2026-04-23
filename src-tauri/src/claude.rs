@@ -12,6 +12,31 @@ pub(crate) fn monitor_dir() -> PathBuf {
     PathBuf::from(home).join(".claude-cat-monitor")
 }
 
+/// Read the tail of a file as a UTF-8 string, safely handling multi-byte
+/// character boundaries.  If seeking lands in the middle of a multi-byte
+/// sequence, the invalid leading bytes are replaced via `from_utf8_lossy`
+/// and the first (likely partial) line is dropped.
+fn read_file_tail(path: &std::path::Path, tail_bytes: u64) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::{Read as IoRead, Seek, SeekFrom};
+
+    let file = fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len <= tail_bytes {
+        return fs::read_to_string(path).map_err(|e| e.into());
+    }
+
+    let mut f = file;
+    f.seek(SeekFrom::End(-(tail_bytes as i64)))?;
+    let mut raw = Vec::new();
+    f.read_to_end(&mut raw)?;
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    // Drop the first (likely partial) line
+    Ok(match text.find('\n') {
+        Some(pos) => text[pos + 1..].to_string(),
+        None => text,
+    })
+}
+
 // ── Prerequisites Check ──
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -217,22 +242,7 @@ pub fn read_session_last_message(
     };
 
     // Read only last ~16KB for speed
-    let file = fs::File::open(&transcript_path)?;
-    let file_len = file.metadata()?.len();
-    let tail_size: u64 = 16 * 1024;
-    let content = if file_len > tail_size {
-        use std::io::{Read as IoRead, Seek, SeekFrom};
-        let mut f = file;
-        f.seek(SeekFrom::End(-(tail_size as i64)))?;
-        let mut buf = String::new();
-        f.read_to_string(&mut buf)?;
-        if let Some(pos) = buf.find('\n') {
-            buf.drain(..=pos);
-        }
-        buf
-    } else {
-        fs::read_to_string(&transcript_path)?
-    };
+    let content = read_file_tail(&transcript_path, 16 * 1024)?;
 
     let mut last_msg: Option<TranscriptMessage> = None;
 
@@ -313,22 +323,7 @@ pub fn read_session_activity(
     };
 
     // Read last ~8KB
-    let file = fs::File::open(&transcript_path)?;
-    let file_len = file.metadata()?.len();
-    let tail_size: u64 = 8 * 1024;
-    let content = if file_len > tail_size {
-        use std::io::{Read as IoRead, Seek, SeekFrom};
-        let mut f = file;
-        f.seek(SeekFrom::End(-(tail_size as i64)))?;
-        let mut buf = String::new();
-        f.read_to_string(&mut buf)?;
-        if let Some(pos) = buf.find('\n') {
-            buf.drain(..=pos);
-        }
-        buf
-    } else {
-        fs::read_to_string(&transcript_path)?
-    };
+    let content = read_file_tail(&transcript_path, 8 * 1024)?;
 
     let (activity, tool_name) = derive_activity_from_content(&content);
 
@@ -479,7 +474,19 @@ pub fn read_live_stats() -> Result<LiveStats, Box<dyn std::error::Error>> {
     let rl_path = cache.join("rate-limits.json");
     if rl_path.exists() {
         if let Ok(content) = fs::read_to_string(&rl_path) {
-            if let Ok(rl) = serde_json::from_str::<RateLimits>(&content) {
+            if let Ok(mut rl) = serde_json::from_str::<RateLimits>(&content) {
+                // If resets_at has passed, the rate limit window has reset —
+                // treat stale cache as 0% until the statusline updates it.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if rl.five_hour.resets_at > 0 && now > rl.five_hour.resets_at {
+                    rl.five_hour.used_percentage = 0.0;
+                }
+                if rl.seven_day.resets_at > 0 && now > rl.seven_day.resets_at {
+                    rl.seven_day.used_percentage = 0.0;
+                }
                 stats.rate_limits = rl;
             }
         }
@@ -572,23 +579,7 @@ pub fn read_session_transcript(
     };
 
     // Only read the tail of the file for performance (last ~256KB)
-    let file = fs::File::open(&transcript_path)?;
-    let file_len = file.metadata()?.len();
-    let tail_size: u64 = 256 * 1024;
-    let content = if file_len > tail_size {
-        use std::io::{Read as IoRead, Seek, SeekFrom};
-        let mut f = file;
-        f.seek(SeekFrom::End(-(tail_size as i64)))?;
-        let mut buf = String::new();
-        f.read_to_string(&mut buf)?;
-        // Drop the first (likely partial) line
-        if let Some(pos) = buf.find('\n') {
-            buf.drain(..=pos);
-        }
-        buf
-    } else {
-        fs::read_to_string(&transcript_path)?
-    };
+    let content = read_file_tail(&transcript_path, 256 * 1024)?;
 
     let mut messages = Vec::new();
 
@@ -1107,22 +1098,7 @@ fn detect_ask_user_question(
         None => return Ok(None),
     };
 
-    let file = fs::File::open(&transcript_path)?;
-    let file_len = file.metadata()?.len();
-    let tail_size: u64 = 32 * 1024;
-    let content = if file_len > tail_size {
-        use std::io::{Read as IoRead, Seek, SeekFrom};
-        let mut f = file;
-        f.seek(SeekFrom::End(-(tail_size as i64)))?;
-        let mut buf = String::new();
-        f.read_to_string(&mut buf)?;
-        if let Some(pos) = buf.find('\n') {
-            buf.drain(..=pos);
-        }
-        buf
-    } else {
-        fs::read_to_string(&transcript_path)?
-    };
+    let content = read_file_tail(&transcript_path, 32 * 1024)?;
 
     let lines: Vec<&str> = content.lines().collect();
     let mut last_ask: Option<(String, serde_json::Value)> = None;

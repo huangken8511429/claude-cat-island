@@ -109,6 +109,8 @@ function App() {
   const lastAutoNotifyBySession = useRef<Map<string, number>>(new Map());
   const approvalFirstSeen = useRef<Map<string, number>>(new Map());
   const lastApprovalBlipTs = useRef(0);
+  const lastContextWarnTs = useRef(0);
+  const wasAboveThreshold = useRef(false);
   // Pin full mode after answering a question, so auto-collapse doesn't fire
   // while the user is still reading the hint / switching to terminal to paste.
   const pinFullUntil = useRef(0);
@@ -415,10 +417,20 @@ function App() {
           prevAlive.current.set(ss.sessionId, ss.isAlive);
         });
 
-        // ── Context warning ──
-        if (ls && ls.rateLimits.five_hour.used_percentage > 80) {
-          playContextWarning();
+        // ── Context warning (debounced: play once on threshold crossing, then max once per 60s) ──
+        const rlFive = ls?.rateLimits?.five_hour;
+        const aboveThreshold = rlFive != null && rlFive.used_percentage > 80 &&
+          (rlFive.resets_at === 0 || rlFive.resets_at > Date.now() / 1000);
+        const now2 = Date.now();
+        if (aboveThreshold) {
+          const justCrossed = !wasAboveThreshold.current;
+          const cooldownPassed = now2 - lastContextWarnTs.current > 60_000;
+          if (justCrossed || cooldownPassed) {
+            playContextWarning();
+            lastContextWarnTs.current = now2;
+          }
         }
+        wasAboveThreshold.current = aboveThreshold;
 
         prevPendingIds.current = new Set(ps.map((pp) => pp.session_id));
       }
@@ -624,8 +636,10 @@ function App() {
   // Derive pill CatLogo emotion state per session
   const getSessionCatState = (session: ClaudeSession): CatState => {
     try {
-      // Global: rate limit applies to all
-      if (live?.rateLimits?.five_hour?.used_percentage != null && live.rateLimits.five_hour.used_percentage > 80) return "sweating";
+      // Global: rate limit applies to all (skip if resets_at has passed — stale cache)
+      const rl = live?.rateLimits?.five_hour;
+      if (rl?.used_percentage != null && rl.used_percentage > 80 &&
+          (rl.resets_at === 0 || rl.resets_at > Date.now() / 1000)) return "sweating";
       // Per-session: needs approval?
       const ps = pendingStates.find((p) => p.session_id === session.sessionId);
       if (ps?.pending === "needs_approval") return "anxious";
