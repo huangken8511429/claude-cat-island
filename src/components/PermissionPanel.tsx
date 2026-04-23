@@ -16,6 +16,7 @@ interface Props {
   onDeleteRule: (id: string) => void;
   onRefreshRules: () => void;
   onAddRule: (name: string, toolName: string, pathPattern: string | null, commandPattern: string | null, action: string) => Promise<void>;
+  onUpdateRule: (id: string, name: string, toolName: string, pathPattern: string | null, commandPattern: string | null, action: string) => Promise<void>;
   onReorderRules: (ids: string[]) => Promise<void>;
   onCheckRuleMatch: (toolName: string, toolInput: string, cwd: string | null) => Promise<RuleMatchResult>;
   onImportPreset: (preset: string) => Promise<void>;
@@ -58,6 +59,7 @@ export default function PermissionPanel({
   onDeleteRule,
   onRefreshRules,
   onAddRule,
+  onUpdateRule,
   onReorderRules,
   onCheckRuleMatch,
   onImportPreset,
@@ -90,6 +92,42 @@ export default function PermissionPanel({
   // Reorder in-progress
   const [reordering, setReordering] = useState(false);
 
+  // Inline edit state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editTool, setEditTool] = useState("");
+  const [editPath, setEditPath] = useState("");
+  const [editCommand, setEditCommand] = useState("");
+  const [editAction, setEditAction] = useState<"allow" | "deny">("allow");
+  const [editSubmitting, setEditSubmitting] = useState(false);
+
+  const startEdit = (rule: ApprovalRule) => {
+    setEditingId(rule.id);
+    setEditName(rule.name);
+    setEditTool(rule.conditions.tool_name);
+    setEditPath(rule.conditions.path_pattern || "");
+    setEditCommand(rule.conditions.command_pattern || "");
+    setEditAction(rule.action);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+  };
+
+  const handleEditSubmit = useCallback(async () => {
+    if (!editingId || !editTool) return;
+    setEditSubmitting(true);
+    try {
+      const name = editName.trim() || autoName(editTool, editAction, editPath, editCommand);
+      const pathPattern = (PATH_TOOLS.has(editTool) || editTool === "*") && editPath.trim() ? editPath.trim() : null;
+      const commandPattern = (editTool === "Bash" || editTool === "*") && editCommand.trim() ? editCommand.trim() : null;
+      await onUpdateRule(editingId, name, editTool, pathPattern, commandPattern, editAction);
+      setEditingId(null);
+    } finally {
+      setEditSubmitting(false);
+    }
+  }, [editingId, editName, editTool, editPath, editCommand, editAction, onUpdateRule]);
+
   const resetForm = () => {
     setFormName("");
     setFormTool("");
@@ -104,8 +142,8 @@ export default function PermissionPanel({
     setFormSubmitting(true);
     try {
       const name = formName.trim() || autoName(formTool, formAction, formPath, formCommand);
-      const pathPattern = PATH_TOOLS.has(formTool) && formPath.trim() ? formPath.trim() : null;
-      const commandPattern = formTool === "Bash" && formCommand.trim() ? formCommand.trim() : null;
+      const pathPattern = (PATH_TOOLS.has(formTool) || formTool === "*") && formPath.trim() ? formPath.trim() : null;
+      const commandPattern = (formTool === "Bash" || formTool === "*") && formCommand.trim() ? formCommand.trim() : null;
       await onAddRule(name, formTool, pathPattern, commandPattern, formAction);
       resetForm();
     } finally {
@@ -409,64 +447,122 @@ export default function PermissionPanel({
                 key={rule.id}
                 className={`rule-card ${!rule.enabled ? "rule-disabled" : ""}`}
               >
-                <div className="rule-card-top">
-                  <div className="rule-reorder-btns">
-                    <button
-                      className="rule-reorder-btn"
-                      onClick={() => handleMoveUp(index)}
-                      disabled={index === 0 || reordering}
-                      title="Move up"
-                      aria-label="Move rule up"
-                      style={{ visibility: index === 0 ? "hidden" : "visible" }}
-                    >
-                      ▲
-                    </button>
-                    <button
-                      className="rule-reorder-btn"
-                      onClick={() => handleMoveDown(index)}
-                      disabled={index === approvalRules.length - 1 || reordering}
-                      title="Move down"
-                      aria-label="Move rule down"
-                      style={{ visibility: index === approvalRules.length - 1 ? "hidden" : "visible" }}
-                    >
-                      ▼
-                    </button>
+                {editingId === rule.id ? (
+                  /* ── Inline Edit Form ── */
+                  <div className="rule-edit-form">
+                    <div className="rule-form-field">
+                      <label className="rule-form-label">Name</label>
+                      <input className="rule-form-input" value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Rule name" />
+                    </div>
+                    <div className="rule-form-field">
+                      <label className="rule-form-label">Tool</label>
+                      <select className="rule-form-select" value={editTool} onChange={(e) => setEditTool(e.target.value)}>
+                        {TOOL_OPTIONS.map((t) => (
+                          <option key={t} value={t}>{t === "*" ? "* (Any Tool)" : t}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {(PATH_TOOLS.has(editTool) || editTool === "*") && (
+                      <div className="rule-form-field">
+                        <label className="rule-form-label">Path Pattern</label>
+                        <input className="rule-form-input" value={editPath} onChange={(e) => setEditPath(e.target.value)} placeholder="e.g. src/**" />
+                      </div>
+                    )}
+                    {(editTool === "Bash" || editTool === "*") && (
+                      <div className="rule-form-field">
+                        <label className="rule-form-label">Command Pattern</label>
+                        <input className="rule-form-input" value={editCommand} onChange={(e) => setEditCommand(e.target.value)} placeholder="e.g. npm test" />
+                      </div>
+                    )}
+                    <div className="rule-form-field">
+                      <label className="rule-form-label">Action</label>
+                      <div className="rule-form-radios">
+                        <label className={`rule-form-radio ${editAction === "allow" ? "selected" : ""}`}>
+                          <input type="radio" name={`edit-action-${rule.id}`} value="allow" checked={editAction === "allow"} onChange={() => setEditAction("allow")} /> Allow
+                        </label>
+                        <label className={`rule-form-radio ${editAction === "deny" ? "selected" : ""}`}>
+                          <input type="radio" name={`edit-action-${rule.id}`} value="deny" checked={editAction === "deny"} onChange={() => setEditAction("deny")} /> Deny
+                        </label>
+                      </div>
+                    </div>
+                    <div className="rule-form-actions">
+                      <button className="pixel-btn-sm" onClick={cancelEdit} disabled={editSubmitting}>CANCEL</button>
+                      <button className="pixel-btn-sm rule-form-save" onClick={handleEditSubmit} disabled={!editTool || editSubmitting}>
+                        {editSubmitting ? "SAVING..." : "SAVE"}
+                      </button>
+                    </div>
                   </div>
-                  <label className="pixel-toggle rule-toggle">
-                    <input
-                      type="checkbox"
-                      checked={rule.enabled}
-                      onChange={() => onToggleRule(rule.id, !rule.enabled)}
-                    />
-                    <span className="toggle-track toggle-track-sm">
-                      <span className="toggle-thumb toggle-thumb-sm" />
-                    </span>
-                  </label>
-                  <div className="rule-info">
-                    <span className="rule-name">{rule.name}</span>
-                  </div>
-                  <span
-                    className={`rule-action-badge ${
-                      rule.action === "allow"
-                        ? "rule-action-allow"
-                        : "rule-action-deny"
-                    }`}
-                  >
-                    {rule.action}
-                  </span>
-                  <button
-                    className="rule-delete-btn"
-                    onClick={() => handleDeleteClick(rule)}
-                    title="Delete rule"
-                    aria-label={`Delete rule ${rule.name}`}
-                  >
-                    x
-                  </button>
-                </div>
-                <div className="rule-card-bottom">
-                  <span className="rule-tool-badge">{rule.conditions.tool_name}</span>
-                  <span className="rule-conditions">{conditionSummary(rule)}</span>
-                </div>
+                ) : (
+                  /* ── Normal Display ── */
+                  <>
+                    <div className="rule-card-top">
+                      <div className="rule-reorder-btns">
+                        <button
+                          className="rule-reorder-btn"
+                          onClick={() => handleMoveUp(index)}
+                          disabled={index === 0 || reordering}
+                          title="Move up"
+                          aria-label="Move rule up"
+                          style={{ visibility: index === 0 ? "hidden" : "visible" }}
+                        >
+                          ▲
+                        </button>
+                        <button
+                          className="rule-reorder-btn"
+                          onClick={() => handleMoveDown(index)}
+                          disabled={index === approvalRules.length - 1 || reordering}
+                          title="Move down"
+                          aria-label="Move rule down"
+                          style={{ visibility: index === approvalRules.length - 1 ? "hidden" : "visible" }}
+                        >
+                          ▼
+                        </button>
+                      </div>
+                      <label className="pixel-toggle rule-toggle">
+                        <input
+                          type="checkbox"
+                          checked={rule.enabled}
+                          onChange={() => onToggleRule(rule.id, !rule.enabled)}
+                        />
+                        <span className="toggle-track toggle-track-sm">
+                          <span className="toggle-thumb toggle-thumb-sm" />
+                        </span>
+                      </label>
+                      <div className="rule-info">
+                        <span className="rule-name">{rule.name}</span>
+                      </div>
+                      <span
+                        className={`rule-action-badge ${
+                          rule.action === "allow"
+                            ? "rule-action-allow"
+                            : "rule-action-deny"
+                        }`}
+                      >
+                        {rule.action}
+                      </span>
+                      <button
+                        className="rule-edit-btn"
+                        onClick={() => startEdit(rule)}
+                        title="Edit rule"
+                        aria-label={`Edit rule ${rule.name}`}
+                      >
+                        ✎
+                      </button>
+                      <button
+                        className="rule-delete-btn"
+                        onClick={() => handleDeleteClick(rule)}
+                        title="Delete rule"
+                        aria-label={`Delete rule ${rule.name}`}
+                      >
+                        x
+                      </button>
+                    </div>
+                    <div className="rule-card-bottom">
+                      <span className="rule-tool-badge">{rule.conditions.tool_name}</span>
+                      <span className="rule-conditions">{conditionSummary(rule)}</span>
+                    </div>
+                  </>
+                )}
               </div>
             ))}
             <div className="rules-fallback">

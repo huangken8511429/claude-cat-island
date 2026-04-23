@@ -539,6 +539,22 @@ function App() {
     }
   };
 
+  const handleUpdateRule = async (id: string, name: string, toolName: string, pathPattern: string | null, commandPattern: string | null, action: string) => {
+    try {
+      await invoke("update_approval_rule", {
+        id,
+        name,
+        toolName,
+        pathPattern: pathPattern || "",
+        commandPattern: commandPattern || "",
+        action,
+      });
+      await fetchApprovalRules();
+    } catch (err) {
+      console.error("Failed to update rule:", err);
+    }
+  };
+
   const handleAddRule = async (name: string, toolName: string, pathPattern: string | null, commandPattern: string | null, action: string) => {
     try {
       await invoke("add_approval_rule", {
@@ -847,6 +863,7 @@ function App() {
                   onDeleteRule={handleDeleteRule}
                   onRefreshRules={fetchApprovalRules}
                   onAddRule={handleAddRule}
+                  onUpdateRule={handleUpdateRule}
                   onReorderRules={handleReorderRules}
                   onCheckRuleMatch={handleCheckRuleMatch}
                   onImportPreset={handleImportPreset} />
