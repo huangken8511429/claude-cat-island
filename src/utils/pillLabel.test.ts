@@ -11,6 +11,7 @@ function makeSession(id: string, cwd: string, alive = true): ClaudeSession {
     kind: "interactive",
     entrypoint: "cli",
     isAlive: alive,
+    provider: "claude",
   };
 }
 

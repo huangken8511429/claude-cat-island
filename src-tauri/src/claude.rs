@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::provider::*;
+
 fn claude_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".claude")
@@ -2372,6 +2374,93 @@ fn ghostty_raise_window(tty_path: Option<&str>) {
         let _ = std::process::Command::new("osascript")
             .args(["-e", r#"tell application "Ghostty" to activate"#])
             .output();
+    }
+}
+
+// ── ClaudeProvider (SessionProvider trait impl) ──
+
+pub struct ClaudeProvider;
+
+impl SessionProvider for ClaudeProvider {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Claude
+    }
+
+    fn discover_sessions(&self) -> Result<Vec<UnifiedSession>, Box<dyn std::error::Error>> {
+        let sessions = read_sessions()?;
+        Ok(sessions.into_iter().map(claude_session_to_unified).collect())
+    }
+
+    fn read_transcript(
+        &self,
+        session_id: &str,
+        cwd: &str,
+    ) -> Result<Vec<UnifiedTranscriptMessage>, Box<dyn std::error::Error>> {
+        let messages = read_session_transcript(session_id, cwd)?;
+        Ok(messages.into_iter().map(transcript_msg_to_unified).collect())
+    }
+
+    fn read_last_message(
+        &self,
+        session_id: &str,
+        cwd: &str,
+    ) -> Result<Option<UnifiedTranscriptMessage>, Box<dyn std::error::Error>> {
+        let msg = read_session_last_message(session_id, cwd)?;
+        Ok(msg.map(transcript_msg_to_unified))
+    }
+
+    fn read_activity(
+        &self,
+        session_id: &str,
+        cwd: &str,
+    ) -> Result<UnifiedActivityInfo, Box<dyn std::error::Error>> {
+        let info = read_session_activity(session_id, cwd)?;
+        Ok(activity_info_to_unified(info))
+    }
+
+    fn supports_hooks(&self) -> bool {
+        true
+    }
+
+    fn supports_approval(&self) -> bool {
+        true
+    }
+
+    fn supports_jump(&self) -> bool {
+        true
+    }
+}
+
+// ── Conversion helpers (private) ──
+
+fn claude_session_to_unified(s: ClaudeSession) -> UnifiedSession {
+    UnifiedSession {
+        pid: s.pid,
+        session_id: s.session_id,
+        cwd: s.cwd,
+        started_at: s.started_at,
+        kind: s.kind,
+        entrypoint: s.entrypoint,
+        is_alive: s.is_alive,
+        provider: ProviderKind::Claude,
+    }
+}
+
+fn transcript_msg_to_unified(m: TranscriptMessage) -> UnifiedTranscriptMessage {
+    UnifiedTranscriptMessage {
+        role: m.role,
+        text: m.text,
+        tool_name: m.tool_name,
+        tool_input: m.tool_input,
+        timestamp: m.timestamp,
+    }
+}
+
+fn activity_info_to_unified(a: SessionActivityInfo) -> UnifiedActivityInfo {
+    UnifiedActivityInfo {
+        session_id: a.session_id,
+        activity: a.activity,
+        tool_name: a.tool_name,
     }
 }
 

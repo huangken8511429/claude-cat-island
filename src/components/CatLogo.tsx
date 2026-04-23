@@ -1,10 +1,11 @@
 import { useEffect, useRef, useMemo } from "react";
-import { CatState } from "../types";
+import { CatState, ProviderKind } from "../types";
 
 interface CatLogoProps {
   state?: CatState;
   size?: number;
   themeIndex?: number;
+  provider?: ProviderKind;
   className?: string;
 }
 
@@ -264,6 +265,17 @@ const THEMES: LogoTheme[] = [
   { body: "#c49a6c", earInner: "#ffb6c1", eye: "#2a5010", nose: "#ff8fab", highlight: "#fff", mouth: "#5a3a10", outline: "#5a3a10", cheek: "#e0a090" },
 ];
 
+const CODEX_THEMES: LogoTheme[] = [
+  // 0: Codex Green
+  { body: "#2dd4a0", earInner: "#a3f0d0", eye: "#0a2a1a", nose: "#ff8fab", highlight: "#fff", mouth: "#0a3020", outline: "#0a3020", cheek: "#7aecc0" },
+  // 1: Codex Mint
+  { body: "#34d399", earInner: "#b0f0d8", eye: "#0a2a1a", nose: "#ffaacc", highlight: "#fff", mouth: "#0a4030", outline: "#0a4030", cheek: "#80e8b8" },
+  // 2: Codex Teal
+  { body: "#14b8a6", earInner: "#80e0d0", eye: "#0a1a18", nose: "#ff8fab", highlight: "#fff", mouth: "#063a34", outline: "#063a34", cheek: "#60d0c0" },
+  // 3: Codex Emerald
+  { body: "#10b981", earInner: "#a0ecc8", eye: "#0a2010", nose: "#ff99bb", highlight: "#fff", mouth: "#054030", outline: "#054030", cheek: "#70d8a8" },
+];
+
 // State-specific color overrides for better visual distinction
 const STATE_OVERRIDES: Partial<Record<string, Partial<Record<number, string>>>> = {
   working: {
@@ -366,12 +378,15 @@ function getStateIndicator(state: string, _size: number): string | null {
   }
 }
 
-export default function CatLogo({ state = "idle", size = 16, themeIndex = 0, className }: CatLogoProps) {
+export default function CatLogo({ state = "idle", size = 16, themeIndex = 0, provider, className }: CatLogoProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const theme = useMemo(() => {
+    if (provider === "codex") {
+      return CODEX_THEMES[themeIndex % CODEX_THEMES.length];
+    }
     return THEMES[themeIndex % THEMES.length];
-  }, [themeIndex]);
+  }, [themeIndex, provider]);
 
   const prefersReducedMotion = useMemo(
     () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,

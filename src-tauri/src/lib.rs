@@ -1,11 +1,13 @@
 mod claude;
+mod codex;
 mod approval;
 mod socket;
 mod settings;
 mod rules;
+mod provider;
 
 use approval::{ApprovalDecision, ApprovalServer, PendingApproval};
-use claude::{ClaudeSession, HookEvent, LatestNotification, LiveStats, PendingQuestion, PermissionConfig, Prerequisites, SessionActivityInfo, SessionPendingState, SkillDetail, SkillInfo, TokenStats, TranscriptMessage};
+use claude::{HookEvent, LatestNotification, LiveStats, PendingQuestion, PermissionConfig, Prerequisites, SessionPendingState, SkillDetail, SkillInfo, TokenStats};
 use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, WebviewWindow};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::tray::TrayIcon;
@@ -17,8 +19,10 @@ fn check_prerequisites() -> Prerequisites {
 }
 
 #[tauri::command]
-fn get_sessions() -> Result<Vec<ClaudeSession>, String> {
-    claude::read_sessions().map_err(|e| e.to_string())
+fn get_sessions(
+    registry: tauri::State<'_, Arc<provider::ProviderRegistry>>,
+) -> Result<Vec<provider::UnifiedSession>, String> {
+    registry.discover_all_sessions().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -42,18 +46,55 @@ fn get_latest_notification() -> Result<LatestNotification, String> {
 }
 
 #[tauri::command]
-fn get_session_transcript(session_id: String, cwd: String) -> Result<Vec<TranscriptMessage>, String> {
-    claude::read_session_transcript(&session_id, &cwd).map_err(|e| e.to_string())
+fn get_session_transcript(
+    registry: tauri::State<'_, Arc<provider::ProviderRegistry>>,
+    session_id: String,
+    cwd: String,
+    provider: Option<String>,
+) -> Result<Vec<provider::UnifiedTranscriptMessage>, String> {
+    let kind = parse_provider_kind(provider.as_deref());
+    let p = registry
+        .find_provider(&kind)
+        .ok_or_else(|| format!("provider {:?} not registered", kind))?;
+    p.read_transcript(&session_id, &cwd)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn get_session_last_message(session_id: String, cwd: String) -> Result<Option<TranscriptMessage>, String> {
-    claude::read_session_last_message(&session_id, &cwd).map_err(|e| e.to_string())
+fn get_session_last_message(
+    registry: tauri::State<'_, Arc<provider::ProviderRegistry>>,
+    session_id: String,
+    cwd: String,
+    provider: Option<String>,
+) -> Result<Option<provider::UnifiedTranscriptMessage>, String> {
+    let kind = parse_provider_kind(provider.as_deref());
+    let p = registry
+        .find_provider(&kind)
+        .ok_or_else(|| format!("provider {:?} not registered", kind))?;
+    p.read_last_message(&session_id, &cwd)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn get_session_activity(session_id: String, cwd: String) -> Result<SessionActivityInfo, String> {
-    claude::read_session_activity(&session_id, &cwd).map_err(|e| e.to_string())
+fn get_session_activity(
+    registry: tauri::State<'_, Arc<provider::ProviderRegistry>>,
+    session_id: String,
+    cwd: String,
+    provider: Option<String>,
+) -> Result<provider::UnifiedActivityInfo, String> {
+    let kind = parse_provider_kind(provider.as_deref());
+    let p = registry
+        .find_provider(&kind)
+        .ok_or_else(|| format!("provider {:?} not registered", kind))?;
+    p.read_activity(&session_id, &cwd)
+        .map_err(|e| e.to_string())
+}
+
+fn parse_provider_kind(provider: Option<&str>) -> provider::ProviderKind {
+    match provider {
+        Some("codex") => provider::ProviderKind::Codex,
+        _ => provider::ProviderKind::Claude,
+    }
 }
 
 #[tauri::command]
@@ -87,8 +128,17 @@ fn get_session_pending_states() -> Result<Vec<SessionPendingState>, String> {
 }
 
 #[tauri::command]
-fn jump_to_session(pid: u32) -> Result<(), String> {
-    claude::jump_to_session(pid).map_err(|e| e.to_string())
+fn jump_to_session(pid: u32, provider: Option<String>) -> Result<(), String> {
+    if provider.as_deref() == Some("codex") {
+        // Codex is a Desktop app — just activate it via AppleScript
+        std::process::Command::new("osascript")
+            .args(["-e", r#"tell application "Codex" to activate"#])
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        claude::jump_to_session(pid).map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -607,10 +657,16 @@ pub fn run() {
         cursor_inside: AtomicBool::new(false),
     });
 
+    let mut registry = provider::ProviderRegistry::new();
+    registry.register(Box::new(claude::ClaudeProvider));
+    registry.register(Box::new(codex::CodexProvider));
+    let registry = Arc::new(registry);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(approval_server.clone())
         .manage(ct_state.clone())
+        .manage(registry)
         .invoke_handler(tauri::generate_handler![
             check_prerequisites,
             get_sessions,

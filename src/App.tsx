@@ -343,7 +343,7 @@ function App() {
       const alive = s.filter((ss) => ss.isAlive);
       Promise.all(
         alive.map((ss) =>
-          invoke<SessionActivityInfo>("get_session_activity", { sessionId: ss.sessionId, cwd: ss.cwd }).catch(() => null)
+          invoke<SessionActivityInfo>("get_session_activity", { sessionId: ss.sessionId, cwd: ss.cwd, provider: ss.provider ?? "claude" }).catch(() => null)
         )
       ).then((results) => {
         const map: Record<string, SessionActivityInfo> = {};
@@ -652,24 +652,35 @@ function App() {
   };
 
   // Derive pill label from socket-pushed tool status, with polling fallback
+  const hasMultipleProviders = new Set(aliveSessions.map((s) => s.provider ?? "claude")).size > 1;
+
   const pillLabel = (() => {
     if (hasPendingApproval) return "Approval needed";
     if (hasPendingQuestion) return pendingQuestions[0].header || "Question";
     if (hasWaitingForInput) return "Waiting for input";
     if (aliveSessions.length === 0) return "";
-    // Pick the most recent tool status across all alive sessions
     const aliveIds = new Set(aliveSessions.map((s) => s.sessionId));
     const relevantStatuses = Object.entries(toolStatuses)
       .filter(([sid]) => aliveIds.has(sid))
       .sort(([, a], [, b]) => b.ts - a.ts);
-    if (relevantStatuses.length > 0) return relevantStatuses[0][1].label;
-    // Fallback: derive from polling-based activity
-    const firstActivity = aliveSessions
-      .map((s) => activities[s.sessionId])
-      .find((a) => a && a.activity !== "idle");
-    if (firstActivity) {
-      const name = firstActivity.toolName ? ` ${firstActivity.toolName}` : "";
-      return firstActivity.activity.replace("_", " ") + name;
+    if (relevantStatuses.length > 0) {
+      const sid = relevantStatuses[0][0];
+      const prefix = hasMultipleProviders
+        ? (aliveSessions.find((s) => s.sessionId === sid)?.provider === "codex" ? "[X] " : "[C] ")
+        : "";
+      return prefix + relevantStatuses[0][1].label;
+    }
+    const firstActive = aliveSessions.find((s) => {
+      const a = activities[s.sessionId];
+      return a && a.activity !== "idle";
+    });
+    if (firstActive) {
+      const a = activities[firstActive.sessionId];
+      const name = a.toolName ? ` ${a.toolName}` : "";
+      const prefix = hasMultipleProviders
+        ? ((firstActive.provider ?? "claude") === "codex" ? "[X] " : "[C] ")
+        : "";
+      return prefix + a.activity.replace("_", " ") + name;
     }
     return "Working...";
   })();
@@ -740,7 +751,7 @@ function App() {
           <div className="pill-left">
             {aliveSessions.length > 0 ? (
               aliveSessions.slice(0, 5).map((s, i) => (
-                <CatLogo key={s.sessionId} state={getSessionCatState(s)} size={20} themeIndex={i} />
+                <CatLogo key={s.sessionId} state={getSessionCatState(s)} size={20} themeIndex={i} provider={s.provider} />
               ))
             ) : (
               <CatLogo state="idle" size={20} />

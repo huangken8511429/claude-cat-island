@@ -59,6 +59,7 @@ export default function SessionDetail({ session, sessions, themeIndex, onSelectS
         const msgs = await invoke<TranscriptMessage[]>("get_session_transcript", {
           sessionId: session.sessionId,
           cwd: session.cwd,
+          provider: session.provider ?? "claude",
         });
         if (!cancelled) {
           setMessages(msgs);

@@ -67,9 +67,9 @@ function truncateText(text: string, maxLen: number): string {
   return oneLine.slice(0, maxLen) + "…";
 }
 
-async function handleJump(pid: number) {
+async function handleJump(pid: number, provider?: string) {
   try {
-    await invoke("jump_to_session", { pid });
+    await invoke("jump_to_session", { pid, provider: provider ?? "claude" });
   } catch (err) {
     console.error("Jump failed:", err);
   }
@@ -93,6 +93,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
   const [lastMessages, setLastMessages] = useState<Record<string, TranscriptMessage>>({});
 
   const aliveSessions = sessions.filter((s) => s.isAlive);
+  const hasMultipleProviders = new Set(aliveSessions.map((s) => s.provider ?? "claude")).size > 1;
 
   const fetchLastMessages = useCallback(async () => {
     const results: Record<string, TranscriptMessage> = {};
@@ -102,6 +103,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
           const msg = await invoke<TranscriptMessage | null>("get_session_last_message", {
             sessionId: s.sessionId,
             cwd: s.cwd,
+            provider: s.provider ?? "claude",
           });
           if (msg) results[s.sessionId] = msg;
         } catch { /* ignore */ }
@@ -182,9 +184,10 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
           const lastMsg = lastMessages[session.sessionId];
           const sessionQuestion = pendingQuestions.find(q => q.sessionId === session.sessionId);
           const state = getState(session, pending, lastMsg);
-          const isApproval = pending?.pending === "needs_approval" && session.isAlive && !sessionQuestion;
-          const isWaiting = pending?.pending === "waiting_input" && session.isAlive;
-          const isQuestion = !!sessionQuestion && session.isAlive;
+          const isCodex = (session.provider ?? "claude") === "codex";
+          const isApproval = !isCodex && pending?.pending === "needs_approval" && session.isAlive && !sessionQuestion;
+          const isWaiting = !isCodex && pending?.pending === "waiting_input" && session.isAlive;
+          const isQuestion = !isCodex && !!sessionQuestion && session.isAlive;
           return (
             <div
               key={session.sessionId}
@@ -200,9 +203,14 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
               }}
             >
               <div className="session-card-top">
-                <CatLogo state={state} size={20} themeIndex={i} />
+                <CatLogo state={state} size={20} themeIndex={i} provider={session.provider} />
                 <div className="session-info">
                   <div className="session-project">
+                    {hasMultipleProviders && (
+                      <span className={`provider-badge provider-${session.provider ?? "claude"}`}>
+                        {isCodex ? "CODEX" : "CLAUDE"}
+                      </span>
+                    )}
                     {getProjectName(session.cwd)}
                     {isQuestion && <span className="pending-badge question">QUESTION</span>}
                     {isApproval && <span className="pending-badge approve">APPROVE</span>}
@@ -224,7 +232,7 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
                   </div>
                   {lastMsg && (
                     <div className={`session-last-msg role-${lastMsg.role}`}>
-                      <span className="last-msg-role">{lastMsg.role === "user" ? "YOU" : "CLAUDE"}</span>
+                      <span className="last-msg-role">{lastMsg.role === "user" ? "YOU" : isCodex ? "CODEX" : "CLAUDE"}</span>
                       <span className="last-msg-text">{truncateText(lastMsg.text, 120)}</span>
                     </div>
                   )}
@@ -236,14 +244,14 @@ export default function SessionPanel({ sessions, pendingStates, pendingApprovals
                   className={`jump-btn full-width ${isApproval ? "approve" : isWaiting ? "ask" : ""}`}
                   onClick={(e) => {
                     e.stopPropagation();
-                    handleJump(session.pid);
+                    handleJump(session.pid, session.provider);
                   }}
-                  title="Jump to terminal"
+                  title={isCodex ? "Jump to Codex" : "Jump to terminal"}
                 >
                   JUMP
                 </button>
               )}
-              {isApproval && pendingApprovals.filter(a => a.sessionId === session.sessionId).length > 0 && (
+              {!isCodex && isApproval && pendingApprovals.filter(a => a.sessionId === session.sessionId).length > 0 && (
                 <div className="inline-approval" onClick={(e) => e.stopPropagation()}>
                   {pendingApprovals.filter(a => a.sessionId === session.sessionId).map((a) => (
                     <div key={a.id} className="inline-approval-item">

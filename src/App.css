@@ -887,6 +887,31 @@ body {
 }
 
 /* ── Pending Badges ── */
+/* ── Provider badge (pixel-style label) ── */
+.provider-badge {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  padding: 1px 4px;
+  margin-right: 5px;
+  letter-spacing: 0.06em;
+  vertical-align: middle;
+  border-radius: 3px;
+  color: #fff;
+  background: var(--text-muted);
+  image-rendering: pixelated;
+}
+
+.provider-claude {
+  background: #60a5fa;
+  color: #0a1a30;
+}
+
+.provider-codex {
+  background: #34d399;
+  color: #0a2a1a;
+}
+
 .pending-badge {
   font-family: var(--font-mono);
   font-size: 9px;

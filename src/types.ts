@@ -1,3 +1,5 @@
+export type ProviderKind = "claude" | "codex";
+
 export interface Prerequisites {
   claudeInstalled: boolean;
   claudeDir: string;
@@ -13,6 +15,7 @@ export interface ClaudeSession {
   kind: string;
   entrypoint: string;
   isAlive: boolean;
+  provider: ProviderKind;
 }
 
 export interface DailyActivity {
