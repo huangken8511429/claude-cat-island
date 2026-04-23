@@ -1852,8 +1852,218 @@ fn append_hook(settings: &mut serde_json::Value, event: &str, hook: serde_json::
     settings["hooks"][event] = serde_json::Value::Array(hooks);
 }
 
-/// Detect which terminal app owns a specific PID by tracing the process tree.
-/// Falls back to checking running terminal apps if the trace fails.
+/// Map a TERM_PROGRAM value to a human-readable terminal app name.
+/// Returns `None` for values like "tmux" that require further parent-chain tracing.
+#[allow(dead_code)]
+fn map_term_program_to_app(term_program: &str) -> Option<String> {
+    match term_program {
+        "iTerm.app" => Some("iTerm2".to_string()),
+        "Apple_Terminal" => Some("Terminal".to_string()),
+        "ghostty" => Some("Ghostty".to_string()),
+        "WarpTerminal" => Some("Warp".to_string()),
+        "Alacritty" => Some("Alacritty".to_string()),
+        "kitty" => Some("kitty".to_string()),
+        "WezTerm" => Some("WezTerm".to_string()),
+        "vscode" => Some("Visual Studio Code".to_string()),
+        "JetBrains-JediTerm" => {
+            // JetBrains IDEs all use JediTerm — can't distinguish IDE from TERM_PROGRAM alone.
+            // Return a generic marker; callers should refine via parent-chain tracing.
+            Some("JetBrains".to_string())
+        }
+        "tmux" | "screen" => None, // Multiplexers — need to trace further up
+        _ => {
+            eprintln!(
+                "[detect] unknown TERM_PROGRAM value: {:?}, skipping",
+                term_program
+            );
+            None
+        }
+    }
+}
+
+/// Parse environment variables from raw `KERN_PROCARGS2` sysctl output.
+/// Format: [argc: i32][exec_path\0][NULLs...][argv0\0][argv1\0]...[NULLs...][env0=val0\0][env1=val1\0]...
+///
+/// Returns the value of `TERM_PROGRAM` if found.
+#[allow(dead_code)]
+fn parse_term_program_from_procargs2(buf: &[u8]) -> Option<String> {
+    if buf.len() < 4 {
+        return None;
+    }
+
+    // 1. Read argc (first 4 bytes, native endian i32)
+    let argc = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let mut pos = 4;
+
+    // 2. Skip exec_path (null-terminated string)
+    while pos < buf.len() && buf[pos] != 0 {
+        pos += 1;
+    }
+    // Skip the null terminator
+    pos += 1;
+
+    // 3. Skip padding NULLs between exec_path and argv[0]
+    while pos < buf.len() && buf[pos] == 0 {
+        pos += 1;
+    }
+
+    // 4. Skip argc argv entries (each null-terminated)
+    let mut args_skipped = 0;
+    while args_skipped < argc && pos < buf.len() {
+        // Skip this null-terminated string
+        while pos < buf.len() && buf[pos] != 0 {
+            pos += 1;
+        }
+        pos += 1; // skip null terminator
+        args_skipped += 1;
+    }
+
+    // 5. Remaining bytes are environment variables (null-terminated strings)
+    let target = b"TERM_PROGRAM=";
+    while pos < buf.len() {
+        // Skip any padding nulls between env vars
+        while pos < buf.len() && buf[pos] == 0 {
+            pos += 1;
+        }
+        if pos >= buf.len() {
+            break;
+        }
+
+        // Find end of this env var string
+        let start = pos;
+        while pos < buf.len() && buf[pos] != 0 {
+            pos += 1;
+        }
+
+        let entry = &buf[start..pos];
+        if entry.starts_with(target) {
+            let value = &entry[target.len()..];
+            if let Ok(s) = std::str::from_utf8(value) {
+                return Some(s.to_string());
+            }
+        }
+
+        pos += 1; // skip null terminator
+    }
+
+    None
+}
+
+/// Read the TERM_PROGRAM environment variable for a given PID.
+///
+/// Primary: macOS `sysctl(CTL_KERN, KERN_PROCARGS2)` — direct kernel read, no subprocess.
+/// Fallback: `ps eww -p <pid>` — shell-based, works when sysctl is restricted.
+#[allow(dead_code)]
+fn read_term_program_for_pid(pid: u32) -> Option<String> {
+    // Primary: sysctl KERN_PROCARGS2
+    if let Some(value) = read_term_program_sysctl(pid) {
+        eprintln!("[detect] TERM_PROGRAM via sysctl for pid={}: {:?}", pid, value);
+        return Some(value);
+    }
+
+    // Fallback: ps eww
+    if let Some(value) = read_term_program_ps(pid) {
+        eprintln!("[detect] TERM_PROGRAM via ps eww for pid={}: {:?}", pid, value);
+        return Some(value);
+    }
+
+    eprintln!("[detect] no TERM_PROGRAM found for pid={}", pid);
+    None
+}
+
+/// Read TERM_PROGRAM via sysctl(CTL_KERN, KERN_PROCARGS2, pid).
+#[allow(dead_code)]
+fn read_term_program_sysctl(pid: u32) -> Option<String> {
+    use std::os::raw::c_int;
+
+    // Constants from <sys/sysctl.h>
+    const CTL_KERN: c_int = 1;
+    const KERN_PROCARGS2: c_int = 49;
+
+    extern "C" {
+        fn sysctl(
+            name: *mut c_int,
+            namelen: std::os::raw::c_uint,
+            oldp: *mut std::os::raw::c_void,
+            oldlenp: *mut usize,
+            newp: *mut std::os::raw::c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+
+    let mut mib: [c_int; 3] = [CTL_KERN, KERN_PROCARGS2, pid as c_int];
+
+    // First call: get required buffer size
+    let mut size: usize = 0;
+    let ret = unsafe {
+        sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || size == 0 {
+        eprintln!(
+            "[detect] sysctl size query failed for pid={} (ret={}, errno={})",
+            pid,
+            ret,
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+
+    // Allocate buffer and read
+    let mut buf: Vec<u8> = vec![0u8; size];
+    let ret = unsafe {
+        sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr() as *mut std::os::raw::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 {
+        eprintln!(
+            "[detect] sysctl read failed for pid={} (ret={}, errno={})",
+            pid,
+            ret,
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+
+    buf.truncate(size);
+    parse_term_program_from_procargs2(&buf)
+}
+
+/// Read TERM_PROGRAM via `ps eww -p <pid>` fallback.
+#[allow(dead_code)]
+fn read_term_program_ps(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["eww", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // ps eww output contains env vars space-separated after the command.
+    // Look for TERM_PROGRAM=<value> in the output.
+    for segment in stdout.split_whitespace() {
+        if let Some(value) = segment.strip_prefix("TERM_PROGRAM=") {
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    eprintln!("[detect] ps eww found no TERM_PROGRAM for pid={}", pid);
+    None
+}
+
 fn detect_terminal_for_pid(pid: u32) -> String {
     // Strategy: PID → find shell on same TTY → trace parent chain up to terminal app
     // The chain is typically: terminal → login → zsh → node(claude)
@@ -2241,5 +2451,208 @@ mod tests {
     fn tool_summary_none_input() {
         let summary = extract_tool_summary("Bash", None);
         assert_eq!(summary, "");
+    }
+
+    // ── TERM_PROGRAM mapping tests ──
+
+    #[test]
+    fn map_term_program_iterm() {
+        assert_eq!(
+            map_term_program_to_app("iTerm.app"),
+            Some("iTerm2".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_apple_terminal() {
+        assert_eq!(
+            map_term_program_to_app("Apple_Terminal"),
+            Some("Terminal".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_ghostty() {
+        assert_eq!(
+            map_term_program_to_app("ghostty"),
+            Some("Ghostty".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_warp() {
+        assert_eq!(
+            map_term_program_to_app("WarpTerminal"),
+            Some("Warp".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_alacritty() {
+        assert_eq!(
+            map_term_program_to_app("Alacritty"),
+            Some("Alacritty".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_kitty() {
+        assert_eq!(
+            map_term_program_to_app("kitty"),
+            Some("kitty".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_wezterm() {
+        assert_eq!(
+            map_term_program_to_app("WezTerm"),
+            Some("WezTerm".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_vscode() {
+        assert_eq!(
+            map_term_program_to_app("vscode"),
+            Some("Visual Studio Code".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_jetbrains() {
+        assert_eq!(
+            map_term_program_to_app("JetBrains-JediTerm"),
+            Some("JetBrains".to_string())
+        );
+    }
+
+    #[test]
+    fn map_term_program_tmux_returns_none() {
+        assert_eq!(map_term_program_to_app("tmux"), None);
+    }
+
+    #[test]
+    fn map_term_program_screen_returns_none() {
+        assert_eq!(map_term_program_to_app("screen"), None);
+    }
+
+    #[test]
+    fn map_term_program_unknown_returns_none() {
+        assert_eq!(map_term_program_to_app("SomeRandomTerminal"), None);
+    }
+
+    // ── KERN_PROCARGS2 parser tests ──
+
+    /// Build a synthetic KERN_PROCARGS2 buffer for testing.
+    fn build_procargs2(exec_path: &str, argv: &[&str], env_vars: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // argc (4 bytes, native endian)
+        let argc = argv.len() as i32;
+        buf.extend_from_slice(&argc.to_ne_bytes());
+
+        // exec_path (null-terminated)
+        buf.extend_from_slice(exec_path.as_bytes());
+        buf.push(0);
+
+        // Padding NULLs (typically 1-3 padding bytes after exec_path)
+        buf.push(0);
+        buf.push(0);
+
+        // argv entries (each null-terminated)
+        for arg in argv {
+            buf.extend_from_slice(arg.as_bytes());
+            buf.push(0);
+        }
+
+        // env vars (each null-terminated, format: KEY=VALUE\0)
+        for var in env_vars {
+            buf.extend_from_slice(var.as_bytes());
+            buf.push(0);
+        }
+
+        buf
+    }
+
+    #[test]
+    fn parse_procargs2_finds_term_program() {
+        let buf = build_procargs2(
+            "/usr/local/bin/node",
+            &["/usr/local/bin/node", "--max-old-space-size=8192"],
+            &[
+                "HOME=/Users/test",
+                "TERM_PROGRAM=ghostty",
+                "SHELL=/bin/zsh",
+            ],
+        );
+        assert_eq!(
+            parse_term_program_from_procargs2(&buf),
+            Some("ghostty".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_procargs2_no_term_program() {
+        let buf = build_procargs2(
+            "/usr/local/bin/node",
+            &["/usr/local/bin/node"],
+            &["HOME=/Users/test", "SHELL=/bin/zsh"],
+        );
+        assert_eq!(parse_term_program_from_procargs2(&buf), None);
+    }
+
+    #[test]
+    fn parse_procargs2_empty_buf() {
+        assert_eq!(parse_term_program_from_procargs2(&[]), None);
+    }
+
+    #[test]
+    fn parse_procargs2_too_short() {
+        assert_eq!(parse_term_program_from_procargs2(&[0, 0]), None);
+    }
+
+    #[test]
+    fn parse_procargs2_iterm() {
+        let buf = build_procargs2(
+            "/usr/bin/login",
+            &["/usr/bin/login", "-pfql", "user"],
+            &[
+                "TERM=xterm-256color",
+                "TERM_PROGRAM=iTerm.app",
+                "LANG=en_US.UTF-8",
+            ],
+        );
+        assert_eq!(
+            parse_term_program_from_procargs2(&buf),
+            Some("iTerm.app".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_procargs2_vscode() {
+        let buf = build_procargs2(
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+            &["electron", "--ms-enable-electron-run-as-node"],
+            &["TERM_PROGRAM=vscode", "TERM_PROGRAM_VERSION=1.90.0"],
+        );
+        assert_eq!(
+            parse_term_program_from_procargs2(&buf),
+            Some("vscode".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_procargs2_term_program_first_env_var() {
+        // TERM_PROGRAM as the very first env var
+        let buf = build_procargs2(
+            "/bin/zsh",
+            &["-zsh"],
+            &["TERM_PROGRAM=WarpTerminal"],
+        );
+        assert_eq!(
+            parse_term_program_from_procargs2(&buf),
+            Some("WarpTerminal".to_string())
+        );
     }
 }
